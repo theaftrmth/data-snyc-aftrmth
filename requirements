@@ -1,0 +1,7 @@
+playwright==1.44.0
+playwright-stealth==1.0.6
+g4f
+pytz
+requests
+yt-dlp
+google-generativeai
