@@ -768,11 +768,11 @@ def ai_select_best_tweet(tweet_list):
 Below are tweets from breaking news sources. Pick the ONE tweet that is the most newsworthy, urgent, and likely to get high engagement.
 
 Consider:
-- Global impact, surprise, conflict, diplomatic moves.
-- Uniqueness (not just a reaction).
-- Relevance right now.
+- Global geopolitical significance and urgency.
+- High public interest and potential engagement.
+- No reaction tweets.
 
-STRICT EXCLUSION: Do NOT select any sports-related tweet (football/soccer World Cup, matches, scores, goals, transfers, players, tournaments, etc.).
+STRICT EXCLUSION: Do NOT select any sports-related tweet.
 
 Tweets:
 {json.dumps(shortlist, indent=2, ensure_ascii=False)}
