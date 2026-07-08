@@ -1141,7 +1141,7 @@ def perform_post_only(page, posted_cache):
             final_caption = parts[0].strip()
             print(f"  ✂️ Caption too long, using first sentence only.")
         else:
-            final_caption = final_caption[:280].rsplit(" ", 1)[0].strip()
+            final_caption = final_caption[:280].rsplit(".", 1)[0].strip()
             print(f"  ✂️ Caption too long, truncated to 280 chars.")
     print(f"  ✅ Caption: {final_caption}")
 
