@@ -41,7 +41,7 @@ TOPIC_MEMORY_FILE = "topic_memory.json"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
-# DAILY POST LIMIT (28–32 posts per day)
+# DAILY POST LIMIT (40–48 posts per day)
 # ──────────────────────────────────────────────
 def get_daily_limit():
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -53,7 +53,7 @@ def get_daily_limit():
                 return data["target"], data["count"]
         except:
             pass
-    target = random.randint(28, 32)
+    target = random.randint(40, 48)          # new daily target
     data = {"date": today_str, "target": target, "count": 0}
     with open(DAILY_LIMIT_FILE, "w") as f:
         json.dump(data, f)
@@ -363,7 +363,7 @@ def score_tweet(text, likes, views=0, age_minutes=9999):
         score += 15
     elif age_minutes <= 120:
         score += 5
-    elif age_minutes > 360:
+    elif age_minutes > 240:          # 4-hour cutoff
         score -= 20
     if is_promotional(text):
         score -= 100
@@ -979,7 +979,7 @@ def _weighted_sample_without_replacement(cands, k):
         pool.remove(pick)
     return chosen
 
-def select_shortlist_for_ai(candidates, top_n=10):
+def select_shortlist_for_ai(candidates, top_n=15):   # increased to 15 for more sources
     by_source = {}
     for c in candidates:
         by_source.setdefault(c['source'], []).append(c)
@@ -1034,7 +1034,7 @@ def perform_post_only(page, posted_cache):
                 if not txt or is_duplicate(txt, posted_cache) or is_promotional(txt) or is_too_short(txt) or is_sports_related(txt):
                     continue
                 age = get_tweet_age_minutes(tweet)
-                if age > 360:
+                if age > 240:          # 4-hour cutoff (was 360)
                     continue
                 like_btn = tweet.query_selector('button[data-testid="like"]')
                 likes = parse_count(like_btn.inner_text()) if like_btn else 0
@@ -1064,7 +1064,7 @@ def perform_post_only(page, posted_cache):
     candidates = filtered_candidates
     # ──────────────────────────────────────────────────────────────────────────
 
-    top_candidates = select_shortlist_for_ai(candidates, top_n=10)
+    top_candidates = select_shortlist_for_ai(candidates, top_n=15)   # pass 15
     best_tweet = ai_select_best_tweet(top_candidates)
     if best_tweet is None:
         best_tweet = max(candidates, key=lambda x: x['score'])
@@ -1169,17 +1169,17 @@ def perform_post_only(page, posted_cache):
         return False
 
 # ──────────────────────────────────────────────
-# HUMAN DELAY FUNCTION
+# HUMAN DELAY FUNCTION (adjusted for 40-48 posts/day)
 # ──────────────────────────────────────────────
 def human_delay(iteration, hour):
     if 6 <= hour < 10:
-        base = random.randint(35, 50) * 60
+        base = random.randint(22, 35) * 60      # ~28 min avg -> ~12.8 posts in 6h
     elif 10 <= hour < 16:
-        base = random.randint(40, 55) * 60
+        base = random.randint(25, 38) * 60      # ~31 min avg -> ~11.6
     elif 16 <= hour < 22:
-        base = random.randint(35, 50) * 60
+        base = random.randint(22, 35) * 60      # ~28 min
     else:
-        base = random.randint(50, 70) * 60
+        base = random.randint(30, 45) * 60      # ~37 min -> ~9.7
     return base
 
 # ──────────────────────────────────────────────
