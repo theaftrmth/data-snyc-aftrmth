@@ -1110,7 +1110,7 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
             continue
         if check_captcha(page):
             return False
-                if check_session_dead(page):
+if check_session_dead(page):
             return "dead"
         # ─────────── DEBUG: বটের চোখে পেজ কেমন দেখাচ্ছে ───────────
         tweets = page.query_selector_all('article[data-testid="tweet"]')
