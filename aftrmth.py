@@ -1110,9 +1110,26 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
             continue
         if check_captcha(page):
             return False
-        if check_session_dead(page):
+                if check_session_dead(page):
             return "dead"
+        # ─────────── DEBUG: বটের চোখে পেজ কেমন দেখাচ্ছে ───────────
         tweets = page.query_selector_all('article[data-testid="tweet"]')
+        print(f"  🔎 @{source}: {len(tweets)} article(s) | url={page.url}")
+        try:
+            shot = f"source_debug_{source}.png"
+            page.screenshot(path=shot)
+            print(f"  📸 Screenshot: {shot}")
+            if not tweets:
+                try:
+                    body_txt = (page.inner_text('body') or "")[:200].replace("\n", " ")
+                except Exception:
+                    body_txt = "?"
+                print(f"  🕳️ PAGE EMPTY! title={page.title()} | body: {body_txt}")
+                with open(f"source_debug_{source}.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+        except Exception as e:
+            print(f"  ⚠️ Debug save error: {e}")
+        # ─────────── DEBUG শেষ ───────────
         if not tweets:
             continue
         for i, tweet in enumerate(tweets[:6]):
