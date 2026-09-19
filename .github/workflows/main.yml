@@ -59,7 +59,7 @@ jobs:
           FALLBACK_IMAGE_URL: ${{ secrets.FALLBACK_IMAGE_URL }}
           HEADLESS: false
           PYTHONUNBUFFERED: 1
-        run: xvfb-run python benosi.py
+        run: xvfb-run python aftrmth.py
 
       - name: Save bot cache
         if: always()
