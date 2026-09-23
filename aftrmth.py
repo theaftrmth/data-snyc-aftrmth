@@ -31,9 +31,9 @@ PROMO_KEYWORDS = [
     "coupon", "affiliate", "sponsored", "ad:", "promotion",
 ]
 
-# ── কেবল জিওপলিটিক্যাল কনটেন্টে অপ্রাসঙ্গিক কয়েকটি টপিক ব্লক করা হচ্ছে ──
+# ── কেবল জিওপলিটিক্যাল কনটেন্টে অপ্রাসঙ্গিক কয়েকটি স্পোর্টস-টপিক ব্লক করা হচ্ছে
 FORBIDDEN_KEYWORDS = [
-    "ki", "ki kinking", "kinking", "kaikan", "india"
+    "xi", "xi jinping", "jinping", "taiwan", "india"
 ]
 
 MEDIA_DIR = "downloaded_media"
@@ -42,7 +42,7 @@ REPLIED_CACHE = "replied_cache.txt"
 CAPTCHA_LOCK_FILE = "captcha_lock.txt"
 DAILY_LIMIT_FILE = "daily_post_limit.json"
 TOPIC_MEMORY_FILE = "topic_memory.json"
-SESSION_CACHE_FILE = "session_state.json"   # Playwright নেটিভ storage_state ক্যাশ
+SESSION_CACHE_FILE = "session_state.json"   # নতুন: Playwright নেটিভ storage_state ক্যাশ
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
@@ -158,7 +158,7 @@ def load_deepseek_session():
                 return data
         except Exception as e:
             print(f"❌ deepseek_session.json error: {e}")
-    print("⚠️ No DeepSeek session found (DEEPSEEK_SESSION_JSON not set). DeepSeek rewrite may fail as logged-out.")
+    print("⚠️  No DeepSeek session found (DEEPSEEK_SESSION_JSON not set). DeepSeek rewrite may fail as logged-out.")
     return None
 
 def apply_deepseek_cookies(context):
@@ -508,7 +508,7 @@ def download_media(url, filename):
 def download_fallback_image():
     url = os.environ.get("FALLBACK_IMAGE_URL")
     if not url:
-        print("ℹ️ FALLBACK_IMAGE_URL সেট করা নেই — media-less পোস্টে fallback ছবি ব্যবহার হবে না।")
+        print("ℹ️  FALLBACK_IMAGE_URL সেট করা নেই — media-less পোস্টে fallback ছবি ব্যবহার হবে না।")
         return None
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
@@ -524,7 +524,7 @@ def download_fallback_image():
             elif url.lower().split("?")[0].endswith(".gif"):
                 ext = ".gif"
             if ext == ".gif" and len(r.content) > 15 * 1024 * 1024:
-                print(f"⚠️ Fallback GIF {len(r.content) / 1024 / 1024:.1f}MB — X-এর ~15MB লিমিট ছাড়িয়ে গেছে, ব্যবহার হবে না।")
+                print(f"⚠️  Fallback GIF {len(r.content) / 1024 / 1024:.1f}MB — X-এর ~15MB লিমিট ছাড়িয়ে গেছে, ব্যবহার হবে না।")
                 return None
             path = os.path.join(MEDIA_DIR, f"fallback_image{ext}")
             with open(path, "wb") as f:
@@ -532,9 +532,9 @@ def download_fallback_image():
             print(f"✅ Fallback image downloaded: {path} ({len(r.content)} bytes)")
             return path
         else:
-            print(f"⚠️ Fallback image download failed: HTTP {r.status_code}")
+            print(f"⚠️  Fallback image download failed: HTTP {r.status_code}")
     except Exception as e:
-        print(f"⚠️ Fallback image download failed: {e}")
+        print(f"⚠️  Fallback image download failed: {e}")
     return None
 
 def download_videos_from_tweet(tweet_url, max_attempts=3):
@@ -668,7 +668,7 @@ def _deepseek_ensure_toggle_on(page, label_text: str) -> None:
                     page.wait_for_timeout(random.uniform(400, 700))
                 return
     except Exception as e:
-        print(f"  ⚠️ DeepSeek toggle '{label_text}' error: {e}")
+        print(f"  ⚠️  DeepSeek toggle '{label_text}' error: {e}")
 
 def _deepseek_is_focused(page, el) -> bool:
     try:
@@ -701,7 +701,7 @@ def _deepseek_find_textarea(page, timeout=8000):
             continue
     return None
 
-def deepseek_rewrite(context, prompt: str):
+def deepseek_rewrite(context, prompt: str) -> str | None:
     ds_session = load_deepseek_session()
     if not ds_session:
         print("  ❌ DeepSeek session not available — cannot rewrite.")
@@ -712,21 +712,25 @@ def deepseek_rewrite(context, prompt: str):
         print("  🌐 DeepSeek page loading...")
         page.goto("https://chat.deepseek.com/", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
+
         # Instant mode-এই থাকি (Expert সিলেক্ট করা হয় না) — den.py-এর মতো
         _deepseek_ensure_toggle_on(page, "Search")
         _deepseek_ensure_toggle_on(page, "DeepThink")
+
         textarea = _deepseek_find_textarea(page)
         if not textarea:
             print("  ❌ DeepSeek textarea not found.")
             page.screenshot(path=f"deepseek_debug_{int(time.time())}.png")
             return None
+
         textarea.click()
         page.wait_for_timeout(500)
         if not _deepseek_is_focused(page, textarea):
             textarea.click()
             page.wait_for_timeout(500)
             if not _deepseek_is_focused(page, textarea):
-                print("  ⚠️ DeepSeek: ক্লিকের পরও ইনপুট বক্স focused হয়নি, তবু টাইপ করার চেষ্টা চলছে...")
+                print("  ⚠️  DeepSeek: ক্লিকের পরও ইনপুট বক্স focused হয়নি, তবু টাইপ করার চেষ্টা চলছে...")
+
         textarea.fill(prompt)
         page.wait_for_timeout(random.uniform(500, 800))
         try:
@@ -734,7 +738,7 @@ def deepseek_rewrite(context, prompt: str):
         except Exception:
             current_value = ""
         if not current_value.strip():
-            print("  ⚠️ DeepSeek: fill()-এর পর বক্স খালি (stale handle সন্দেহ), textarea নতুন করে খুঁজে রিট্রাই করছি...")
+            print("  ⚠️  DeepSeek: fill()-এর পর বক্স খালি (stale handle সন্দেহ), textarea নতুন করে খুঁজে রিট্রাই করছি...")
             textarea = _deepseek_find_textarea(page, timeout=5000)
             if textarea:
                 textarea.click()
@@ -748,6 +752,7 @@ def deepseek_rewrite(context, prompt: str):
             if not textarea or not current_value.strip():
                 print("  ❌ DeepSeek: রিট্রাইতেও বক্স খালি — প্রম্পট সাবমিট না করেই থামছে।")
                 return None
+
         sent = False
         try:
             btn = page.wait_for_selector(
@@ -760,8 +765,10 @@ def deepseek_rewrite(context, prompt: str):
             pass
         if not sent:
             page.keyboard.press("Enter")
+
         print("  ⏳ Waiting for DeepSeek response (Search + DeepThink, ~90s)...")
         page.wait_for_timeout(90000)
+
         response_text = ""
         last_text = ""
         stable_count = 0
@@ -775,7 +782,10 @@ def deepseek_rewrite(context, prompt: str):
                     last_block = blocks[-1]
                     # সাইটেশন widget-গুলো টেক্সট তোলার আগেই DOM থেকে সরানো হয় —
                     # নাহলে hidden spacer span (opacity:0 কিন্তু layout দখল করে) থাকায়
-                    # Chromium-এর innerText অযাচিত লাইন-ব্রেক ঢুকিয়ে দেয়।
+                    # Chromium-এর innerText অযাচিত লাইন-ব্রেক ঢুকিয়ে দেয়। সংখ্যাওয়ালা
+                    # badge গুলো .ds-markdown-cite-এ, আর SVG-লোগো/লিংক-টাইপগুলো
+                    # DeepSeek-এর নিজস্ব hash class-এ (বিল্ডে বদলায়) — তাই class-এর
+                    # বদলে inline style + ভেতরে svg এই structural প্যাটার্ন ধরা হয়।
                     last_block.evaluate(
                         """(el) => {
                             el.querySelectorAll('.ds-markdown-cite').forEach(n => n.remove());
@@ -797,19 +807,22 @@ def deepseek_rewrite(context, prompt: str):
                             break
             except Exception:
                 pass
+
         if not response_text and last_text:
             response_text = last_text
+
         REFUSAL_PHRASES = ["beyond my current scope", "i cannot", "i'm unable"]
         if response_text and any(p in response_text.lower() for p in REFUSAL_PHRASES):
             print(f"  🚫 DeepSeek refused: {response_text[:80]}...")
             return None
+
         if response_text:
             print(f"  ✅ DeepSeek response: {response_text[:100]}...")
             return response_text
         else:
-            print("  ⚠️ DeepSeek no response.")
+            print("  ⚠️  DeepSeek no response.")
     except Exception as e:
-        print(f"  ⚠️ DeepSeek error: {e}")
+        print(f"  ⚠️  DeepSeek error: {e}")
     finally:
         page.close()
         ds_context.close()
@@ -822,7 +835,7 @@ def clean_text(text):
     text = re.sub(r'\*+', '', text)
     text = re.sub(r'_+', '', text)
     text = re.sub(r'#+', '', text)
-    text = text.replace('\"', '"').replace("\'", "'")
+    text = text.replace('\\"', '"').replace("\\'", "'")
     return text.strip()
 
 def ai_call(prompt):
@@ -874,19 +887,26 @@ Example: 2"""
 # ──────────────────────────────────────────────
 def build_final_caption(original_text, context=None):
     prompt = f"""IMPORTANT: All output must be in simple words.
+
 Think step by step: Internally create 3 distinct drafts, each with a main sentence and 2, 3 detailed sentences everything under 280 total characters with key facts, in simple words. Then critically compare them—check for conciseness, factual accuracy, and strict character limit. Select the best one or merge the strongest parts into a single final version. After that, output only the final two lines in the format below, with no extra text.
+
 Search web, rewrite this into a main sentence and 2, 3 detailed sentences everything under 280 total characters with key facts only, in simple words. No extra words. Try to include any relevant direct quotes if available.
 If search does not confirm the tweet, ignore all other rules and just rewrite the tweet in simple words. Do not fact-check, do not add extra info, and do not follow the title/sentence format.
+
 CRITICAL FORMAT RULES:
-Output exactly two lines separated by one blank line.
-First line: Main sentence.
-Leave a blank line.
-Third line: 2 or 3 detailed sentences.
+- Output exactly two lines separated by one blank line.
+- First line: Main sentence.
+- Leave a blank line.
+- Third line: 2 or 3 detailed sentences.
+
 Example of correct output:
+
 Catastrophic 7.8 magnitude earthquake hits central Turkey, over 1,500 dead
 
 Rescue teams work early Monday in freezing weather. They pull survivors from collapsed buildings as the death toll rises and thousands remain injured.
-Tweet:
+
+Tweet
+
 {original_text}"""
     if context:
         result = deepseek_rewrite(context, prompt)
@@ -1076,8 +1096,7 @@ def select_shortlist_for_ai(candidates, top_n=15):   # increased to 15 for more 
     return shortlist
 
 # ──────────────────────────────────────────────
-# POST-ONLY FUNCTION (with topic memory filter + 280‑char safety + fallback image
-# + DEBUG screenshot/ফিল্টার-রিপোর্ট)
+# POST-ONLY FUNCTION (with topic memory filter + 280‑char safety + fallback image)
 # ──────────────────────────────────────────────
 def perform_post_only(page, posted_cache, fallback_image_path=None):
     context = page.context
@@ -1093,57 +1112,19 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
             return False
         if check_session_dead(page):
             return "dead"
-        # ─────────── DEBUG: বটের চোখে পেজ কেমন দেখাচ্ছে ───────────
         tweets = page.query_selector_all('article[data-testid="tweet"]')
-        print(f"  🔎 @{source}: {len(tweets)} article(s) | url={page.url}")
-        try:
-            shot = f"source_debug_{source}.png"
-            page.screenshot(path=shot)
-            print(f"  📸 Screenshot: {shot}")
-            if not tweets:
-                try:
-                    body_txt = (page.inner_text('body') or "")[:200].replace("\n", " ")
-                except Exception:
-                    body_txt = "?"
-                print(f"  🕳️ PAGE EMPTY! title={page.title()} | body: {body_txt}")
-                with open(f"source_debug_{source}.html", "w", encoding="utf-8") as f:
-                    f.write(page.content())
-        except Exception as e:
-            print(f"  ⚠️ Debug save error: {e}")
-        # ─────────── DEBUG শেষ ───────────
         if not tweets:
             continue
         for i, tweet in enumerate(tweets[:6]):
             try:
-                if is_pinned_tweet(tweet):
-                    print(f"   ⏭️ {i+1}: pinned")
-                    continue
-                if is_retweet(tweet):
-                    print(f"   ⏭️ {i+1}: retweet")
-                    continue
-                if is_thread_continuation(tweet):
-                    print(f"   ⏭️ {i+1}: reply/thread")
+                if is_pinned_tweet(tweet) or is_retweet(tweet) or is_thread_continuation(tweet):
                     continue
                 text_el = tweet.query_selector('div[data-testid="tweetText"]')
                 txt = text_el.inner_text() if text_el else ""
-                if not txt:
-                    print(f"   ⏭️ {i+1}: TEXT EMPTY (selector broken?)")
-                    continue
-                if is_duplicate(txt, posted_cache):
-                    print(f"   ⏭️ {i+1}: duplicate")
-                    continue
-                if is_promotional(txt):
-                    print(f"   ⏭️ {i+1}: promo")
-                    continue
-                if is_too_short(txt):
-                    print(f"   ⏭️ {i+1}: too short")
-                    continue
-                if is_forbidden_topic(txt):
-                    print(f"   ⏭️ {i+1}: forbidden kw")
+                if not txt or is_duplicate(txt, posted_cache) or is_promotional(txt) or is_too_short(txt) or is_forbidden_topic(txt):
                     continue
                 age = get_tweet_age_minutes(tweet)
                 if age > 240:          # 4-hour cutoff
-                    print(f"   ⏭️ {i+1}: too old ({age}m)")
                     continue
                 like_btn = tweet.query_selector('button[data-testid="like"]')
                 likes = parse_count(like_btn.inner_text()) if like_btn else 0
@@ -1227,7 +1208,7 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
                         print("  ⚠️ Next candidate also too large, posting text only.")
                         media_paths = []
                         has_video = False
-    print(f"  🎥 Video: {has_video}, 🖼 Media: {len(media_paths) if isinstance(media_paths, list) else 0} files")
+        print(f"  🎥 Video: {has_video}, 🖼 Media: {len(media_paths) if isinstance(media_paths, list) else 0} files")
     # ── কোনো নেটিভ মিডিয়া না পাওয়া গেলে fallback ছবি ব্যবহার (run-এর জন্য একবার ডাউনলোড করা কপি) ──
     if not media_paths and fallback_image_path and os.path.exists(fallback_image_path):
         print("  🖼️ No native media found — using fallback image.")
@@ -1239,10 +1220,10 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
         parts = final_caption.split("\n\n")
         if len(parts) > 1:
             final_caption = parts[0].strip()
-            print("  ✂️ Caption too long, using first sentence only.")
+            print(f"  ✂️ Caption too long, using first sentence only.")
         else:
-            final_caption = final_caption[:280].rsplit(". ", 1)[0].strip()
-            print("  ✂️ Caption too long, truncated to 280 chars.")
+            final_caption = final_caption[:280].rsplit(".", 1)[0].strip()
+            print(f"  ✂️ Caption too long, truncated to 280 chars.")
     print(f"  ✅ Caption: {final_caption}")
     print("\n📤 Posting...")
     try:
@@ -1263,11 +1244,11 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
         add_to_topic_memory(original_text)
         trim_cache(POSTED_CACHE)
         print("✅ Post successful!")
-        save_session_cache(context, label="post")   # রোটেটেড কুকি ক্যাশে ধরা থাকবে
+        save_session_cache(context, label="post")   # নতুন: রোটেটেড কুকি ক্যাশে ধরা থাকবে
         limit_reached = increment_daily_counter()
         simulate_scroll(page)
         if limit_reached:
-            print("🎯 Daily post limit reached. Stopping further posts today.")
+            print(f"🎯 Daily post limit reached. Stopping further posts today.")
         return True
     else:
         print("❌ Post failed.")
@@ -1352,8 +1333,8 @@ def run_bot_loop():
             const originalQuery = window.navigator.permissions.query;
             window.navigator.permissions.query = (parameters) => (
                 parameters.name === 'notifications' ?
-                Promise.resolve({state: Notification.permission}) :
-                originalQuery(parameters)
+                    Promise.resolve({state: Notification.permission}) :
+                    originalQuery(parameters)
             );
         """)
         # ── run শুরুতে একবারই fallback ছবি ডাউনলোড, পুরো ৬ ঘণ্টা reuse হবে ──
@@ -1369,7 +1350,7 @@ def run_bot_loop():
                 break
             elapsed = time.time() - start_time
             if elapsed > MAX_DURATION - 300:
-                print(" Approaching 6-hour limit. Exiting loop.", flush=True)
+                print("⏰ Approaching 6-hour limit. Exiting loop.", flush=True)
                 break
             if is_captcha_locked():
                 print("🔒 Captcha lock active. Exiting loop.", flush=True)
@@ -1390,9 +1371,9 @@ def run_bot_loop():
                 break
             if not success:
                 print("⚠️ Post failed, continuing after delay.", flush=True)
-                delay = human_delay(iteration, now.hour)
-                print(f"⏳ Next post in {delay//60} minutes...", flush=True)
-                time.sleep(delay)
+            delay = human_delay(iteration, now.hour)
+            print(f"⏳ Next post in {delay//60} minutes...", flush=True)
+            time.sleep(delay)
         if session_died:
             clear_session_cache()
         else:
