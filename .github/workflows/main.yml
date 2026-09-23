@@ -59,7 +59,7 @@ jobs:
           FALLBACK_IMAGE_URL: ${{ secrets.FALLBACK_IMAGE_URL }}
           HEADLESS: false
           PYTHONUNBUFFERED: 1
-        run: xvfb-run python aftrmth.py
+        run: xvfb-run python benosi.py
 
       - name: Save bot cache
         if: always()
@@ -97,15 +97,3 @@ jobs:
         with:
           name: deepseek-debug-screenshots
           path: deepseek_debug_*.png
-
-      - name: Upload source debug screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: source-debug-screenshots
-          path: |
-            source_debug_*.png
-            source_debug_*.html
-          if-no-files-found: ignore
-          retention-days: 7
