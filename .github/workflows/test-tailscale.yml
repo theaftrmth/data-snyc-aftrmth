@@ -1,0 +1,71 @@
+name: Test Tailscale IP Routing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-tailscale:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright requests yt-dlp
+          playwright install --with-deps chrome
+          sudo apt-get install -y xvfb
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --accept-routes --exit-node=${{ secrets.TS_EXIT_NODE_IP }} --hostname=gha-test
+
+      - name: Verify curl outbound IP
+        run: |
+          echo "=== curl IP ==="
+          curl -s https://api.ipify.org
+          echo ""
+
+      - name: Verify Playwright outbound IP
+        run: |
+          cat > check_playwright_ip.py << 'EOF'
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=False)
+              page = browser.new_page()
+              page.goto("https://api.ipify.org")
+              content = page.content()
+              print("=== Playwright browser IP page content ===")
+              print(content)
+              browser.close()
+          EOF
+          xvfb-run python check_playwright_ip.py
+
+      - name: Verify yt-dlp outbound IP
+        run: |
+          echo "=== yt-dlp IP check ==="
+          yt-dlp --print "ip" "https://api.ipify.org" 2>/dev/null || echo "yt-dlp direct IP check not supported this way, trying alt method"
+          python3 -c "
+          import yt_dlp
+          import urllib.request
+          req = urllib.request.Request('https://api.ipify.org')
+          print('=== Python urllib (used internally by yt-dlp) IP ===')
+          print(urllib.request.urlopen(req).read().decode())
+          "
+
+      - name: Summary reminder
+        run: |
+          echo "Compare the three IPs above."
+          echo "If they all match your home/local public IP, Tailscale routing works for everything."
+          echo "If curl matches but Playwright or yt-dlp show a different (datacenter) IP, you'll need to add proxy config to those tools in your code."
