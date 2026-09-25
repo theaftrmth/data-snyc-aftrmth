@@ -1,19 +1,15 @@
 name: Run X Bot
-
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [run-bot]
-
 concurrency:
   group: run-bot-group
   cancel-in-progress: false
-
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -35,6 +31,18 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chrome
           sudo apt-get install -y xvfb
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --accept-routes --exit-node=${{ secrets.TS_EXIT_NODE_IP }} --hostname=gha-xbot
+
+      - name: Verify outbound IP
+        run: |
+          echo "Outbound IP:"
+          curl -s https://api.ipify.org
+          echo ""
 
       - name: Restore bot cache
         id: cache-restore
@@ -59,7 +67,7 @@ jobs:
           FALLBACK_IMAGE_URL: ${{ secrets.FALLBACK_IMAGE_URL }}
           HEADLESS: false
           PYTHONUNBUFFERED: 1
-        run: xvfb-run python benosi.py
+        run: xvfb-run python aftrmth.py
 
       - name: Save bot cache
         if: always()
