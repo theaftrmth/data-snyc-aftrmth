@@ -33,7 +33,7 @@ PROMO_KEYWORDS = [
 
 # ── কেবল জিওপলিটিক্যাল কনটেন্টে অপ্রাসঙ্গিক কয়েকটি স্পোর্টস-টপিক ব্লক করা হচ্ছে
 FORBIDDEN_KEYWORDS = [
-    "xi", "xi jinping", "jinping", "taiwan", "india"
+    "ki", "ki kinping", "kinking", "kaikan", "india"
 ]
 
 MEDIA_DIR = "downloaded_media"
