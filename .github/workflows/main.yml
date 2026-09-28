@@ -1,15 +1,19 @@
 name: Run X Bot
+
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [run-bot]
+
 concurrency:
   group: run-bot-group
   cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 250          # ← শুধু সেফটি ছাদ (MAX_RUN_MINUTES + ১৫ মি বাফার)
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -67,7 +71,8 @@ jobs:
           FALLBACK_IMAGE_URL: ${{ secrets.FALLBACK_IMAGE_URL }}
           HEADLESS: false
           PYTHONUNBUFFERED: 1
-        run: xvfb-run python aftrmth.py
+          MAX_RUN_MINUTES: 235    # ← রান-ডিউরেশনের আসল নব এখানে (৩ঘ ৫৫মি)
+        run: xvfb-run python benosi.py
 
       - name: Save bot cache
         if: always()
