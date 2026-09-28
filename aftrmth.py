@@ -33,7 +33,7 @@ PROMO_KEYWORDS = [
 
 # ── কেবল জিওপলিটিক্যাল কনটেন্টে অপ্রাসঙ্গিক কয়েকটি স্পোর্টস-টপিক ব্লক করা হচ্ছে
 FORBIDDEN_KEYWORDS = [
-    "xi", "xi jinping", "jinping", "taiwan", "india"
+    "ki", "ki kinping", "kinking", "kaikan", "india"
 ]
 
 MEDIA_DIR = "downloaded_media"
@@ -47,7 +47,7 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
 # ──────────────────────────────────────────────
-# DAILY POST LIMIT (40–48 posts per day)
+# DAILY POST LIMIT (18–22 posts per day — অফিস-আওয়ার স্ট্র্যাটেজি)
 # ──────────────────────────────────────────────
 def get_daily_limit():
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -59,7 +59,7 @@ def get_daily_limit():
                 return data["target"], data["count"]
         except:
             pass
-    target = random.randint(40, 48)
+    target = random.randint(18, 22)
     data = {"date": today_str, "target": target, "count": 0}
     with open(DAILY_LIMIT_FILE, "w") as f:
         json.dump(data, f)
@@ -543,7 +543,7 @@ def download_media(url, filename):
 
 
 # ──────────────────────────────────────────────
-# FALLBACK IMAGE (media-less পোস্টের জন্য) — run শুরুতে একবার ডাউনলোড, পুরো ৬ ঘণ্টা reuse
+# FALLBACK IMAGE (media-less পোস্টের জন্য) — run শুরুতে একবার ডাউনলোড, পুরো রান জুড়ে reuse
 # ──────────────────────────────────────────────
 def download_fallback_image():
     url = os.environ.get("FALLBACK_IMAGE_URL")
@@ -1220,7 +1220,7 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
         tweets = page.query_selector_all('article[data-testid="tweet"]')
         if not tweets:
             continue
-        for i, tweet in enumerate(tweets[:6]):
+        for i, tweet in enumerate(tweets[:8]):   # ৬ → ৮: সাপ্লাই ইনশুরেন্স
             try:
                 if is_pinned_tweet(tweet) or is_retweet(tweet) or is_thread_continuation(tweet):
                     continue
@@ -1368,22 +1368,14 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
 
 
 # ──────────────────────────────────────────────
-# HUMAN DELAY FUNCTION (adjusted for 40-48 posts/day)
+# HUMAN DELAY (office-hour strategy: পোস্ট-সাইকেল শেষে ৫–১৫ মিনিট র‍্যান্ডম বিরতি)
 # ──────────────────────────────────────────────
-def human_delay(iteration, hour):
-    if 6 <= hour < 10:
-        base = random.randint(22, 35) * 60      # ~28 min avg -> ~12.8 posts in 6h
-    elif 10 <= hour < 16:
-        base = random.randint(25, 38) * 60      # ~31 min avg -> ~11.6
-    elif 16 <= hour < 22:
-        base = random.randint(22, 35) * 60      # ~28 min
-    else:
-        base = random.randint(30, 45) * 60      # ~37 min -> ~9.7
-    return base
+def human_delay():
+    return random.randint(5, 15) * 60
 
 
 # ──────────────────────────────────────────────
-# MAIN LOOP
+# MAIN LOOP (রান-উইন্ডো workflow-এর MAX_RUN_MINUTES env থেকে আসে)
 # ──────────────────────────────────────────────
 def run_bot_loop():
     if not validate_session():
@@ -1396,7 +1388,10 @@ def run_bot_loop():
         print("🎯 Today's post limit already reached. Exiting.")
         return
 
-    MAX_DURATION = 6 * 3600
+    # ── রান-ডিউরেশনের নব workflow-এ (MAX_RUN_MINUTES env); কোড শুধু মানটা পড়ে নেয় ──
+    MAX_RUN_MINUTES = int(os.environ.get("MAX_RUN_MINUTES", "235"))
+    MAX_DURATION = MAX_RUN_MINUTES * 60
+    print(f"⏱ Run window: {MAX_RUN_MINUTES} minutes (workflow-set).")
     start_time = time.time()
 
     with sync_playwright() as p:
@@ -1454,13 +1449,14 @@ def run_bot_loop():
             );
         """)
 
-        # ── run শুরুতে একবারই fallback ছবি ডাউনলোড, পুরো ৬ ঘণ্টা reuse হবে ──
+        # ── run শুরুতে একবারই fallback ছবি ডাউনলোড, পুরো রান জুড়ে reuse হবে ──
         fallback_image_path = download_fallback_image()
 
         print(f"\n🤖 News Bot started (Post-Only Mode) — {datetime.now(BD_TZ).strftime('%Y-%m-%d %H:%M:%S')} (BD time)")
         iteration = 0
+        posts_since_siesta = 0
         session_died = False
-        SIESTA_EVERY = 1000
+        SIESTA_EVERY = 8             # প্রতি ৮ পোস্টে একবার চা-বিরতি
 
         while True:
             target, current = get_daily_limit()
@@ -1468,17 +1464,12 @@ def run_bot_loop():
                 print("🎯 Daily limit reached. Stopping.")
                 break
             elapsed = time.time() - start_time
-            if elapsed > MAX_DURATION - 300:
-                print("⏰ Approaching 6-hour limit. Exiting loop.", flush=True)
+            if elapsed > MAX_DURATION:
+                print(f"⏰ MAX_RUN_MINUTES ({MAX_RUN_MINUTES}m, workflow-set) reached. Exiting loop gracefully.", flush=True)
                 break
             if is_captcha_locked():
                 print("🔒 Captcha lock active. Exiting loop.", flush=True)
                 break
-            if iteration > 0 and iteration % SIESTA_EVERY == 0:
-                siesta = random.randint(45, 90) * 60
-                print(f"\n☕ Siesta for {siesta//60} minutes...", flush=True)
-                time.sleep(siesta)
-                continue
             iteration += 1
             now = datetime.now(BD_TZ)
             print(f"\n🔄 Post iteration {iteration} — {now.strftime('%H:%M:%S')} (BD time)", flush=True)
@@ -1490,9 +1481,15 @@ def run_bot_loop():
                 break
             if not success:
                 print("⚠️ Post failed, continuing after delay.", flush=True)
-            delay = human_delay(iteration, now.hour)
+            delay = human_delay()
             print(f"⏳ Next post in {delay//60} minutes...", flush=True)
             time.sleep(delay)
+            posts_since_siesta += 1
+            if posts_since_siesta >= SIESTA_EVERY:
+                siesta = random.randint(10, 15) * 60
+                print(f"\n☕ Siesta for {siesta//60} minutes...", flush=True)
+                time.sleep(siesta)
+                posts_since_siesta = 0
 
         if session_died:
             clear_session_cache()
