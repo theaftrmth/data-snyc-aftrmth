@@ -72,7 +72,7 @@ jobs:
           HEADLESS: false
           PYTHONUNBUFFERED: 1
           MAX_RUN_MINUTES: 235    # ← রান-ডিউরেশনের আসল নব এখানে (৩ঘ ৫৫মি)
-        run: xvfb-run python benosi.py
+        run: xvfb-run python aftrmth.py
 
       - name: Save bot cache
         if: always()
