@@ -1,3 +1,7 @@
+# ── Tailscale (ফোন exit node) চালু/বন্ধ ──
+# রেপোর Settings → Secrets and variables → Actions → **Variables** ট্যাবে:
+#   USE_TAILSCALE = true        → ফোনের exit node দিয়ে চলবে
+#   (ভেরিয়েবল না থাকলে বা false) → Tailscale ধাপগুলো বাদ, সরাসরি GitHub-এর IP দিয়ে চলবে (ডিফল্ট)
 name: Run X Bot
 
 on:
@@ -12,7 +16,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
-    timeout-minutes: 250          # ← শুধু সেফটি ছাদ (MAX_RUN_MINUTES + ১৫ মি বাফার)
+    timeout-minutes: 250          # শুধু সেফটি ছাদ (MAX_RUN_MINUTES + ১৫ মি বাফার)
 
     steps:
       - name: Checkout repo
@@ -29,6 +33,7 @@ jobs:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
 
+      # ভারী ডাউনলোড (pip, Chrome) Tailscale চালুর আগে — যাতে ফোনের ডেটা/ব্যাটারি না খায়
       - name: Install dependencies
         run: |
           pip install --upgrade pip
@@ -36,17 +41,56 @@ jobs:
           playwright install --with-deps chrome
           sudo apt-get install -y xvfb
 
+      # exit node লাগানোর আগে GitHub-এর নিজের IP টুকে রাখি — পরে তুলনার জন্য
+      - name: Record direct IP (before Tailscale)
+        id: direct-ip
+        if: ${{ vars.USE_TAILSCALE == 'true' }}
+        run: |
+          IP=$(curl -s --max-time 20 https://api.ipify.org || true)
+          echo "Direct (GitHub runner) IP: $IP"
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+
       - name: Connect Tailscale
+        if: ${{ vars.USE_TAILSCALE == 'true' }}
         uses: tailscale/github-action@v2
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --accept-routes --exit-node=${{ secrets.TS_EXIT_NODE_IP }} --hostname=gha-xbot
 
-      - name: Verify outbound IP
+      # ফেল-ফাস্ট: ফোন বন্ধ/Tailscale ঘুমন্ত হলে বা ট্রাফিক exit node দিয়ে না গেলে রান এখানেই লাল হবে
+      - name: Verify exit node (fail fast)
+        if: ${{ vars.USE_TAILSCALE == 'true' }}
         run: |
-          echo "Outbound IP:"
-          curl -s https://api.ipify.org
-          echo ""
+          DIRECT="${{ steps.direct-ip.outputs.ip }}"
+          NEW=""
+          for i in 1 2 3 4 5; do
+            NEW=$(curl -s --max-time 20 https://api.ipify.org || true)
+            if [ -n "$NEW" ]; then break; fi
+            echo "attempt $i: কোনো উত্তর নেই, ৮ সেকেন্ড পর আবার..."
+            sleep 8
+          done
+          echo "Outbound IP via exit node: $NEW  (direct ছিল: $DIRECT)"
+          if [ -z "$NEW" ]; then
+            echo "::error::Exit node-এ পৌঁছানো যাচ্ছে না — ফোন চালু/Tailscale সংযুক্ত আছে কিনা দেখুন।"
+            exit 1
+          fi
+          if [ -n "$DIRECT" ] && [ "$NEW" = "$DIRECT" ]; then
+            echo "::error::ট্রাফিক exit node দিয়ে যাচ্ছে না (IP এখনো GitHub-এর)।"
+            exit 1
+          fi
+
+      # তথ্যমূলক: ফোন exit node-এর গতি মাপা (ব্যর্থ হলে রান থামে না)
+      - name: Exit node speed check (info only)
+        if: ${{ vars.USE_TAILSCALE == 'true' }}
+        continue-on-error: true
+        run: |
+          SPEED=$(curl -s -o /dev/null --max-time 25 -w '%{speed_download}' "https://speed.cloudflare.com/__down?bytes=10000000" || echo 0)
+          awk -v s="$SPEED" 'BEGIN { printf "Exit node download speed: %.1f Mbit/s\n", s*8/1000000 }'
+
+      # সবসময় চলে: বট আসলে কোন IP থেকে বের হচ্ছে লগে থাকবে (Tailscale চালু/বন্ধ যা-ই হোক)
+      - name: Show outbound IP (info)
+        continue-on-error: true
+        run: echo "Bot outbound IP:" "$(curl -s --max-time 20 https://api.ipify.org)"
 
       - name: Restore bot cache
         id: cache-restore
@@ -69,10 +113,18 @@ jobs:
           DEEPSEEK_SESSION_JSON: ${{ secrets.DEEPSEEK_SESSION_JSON }}
           SOURCES: ${{ secrets.SOURCES }}
           FALLBACK_IMAGE_URL: ${{ secrets.FALLBACK_IMAGE_URL }}
+          EXPECTED_HANDLE: ${{ secrets.EXPECTED_HANDLE }}   # ঐচ্ছিক: secret না থাকলে ফাঁকা, কোড তখন মেলায় না
           HEADLESS: false
           PYTHONUNBUFFERED: 1
           MAX_RUN_MINUTES: 235    # ← রান-ডিউরেশনের আসল নব এখানে (৩ঘ ৫৫মি)
-        run: xvfb-run python aftrmth.py
+        run: xvfb-run python benosi.py
+
+      # রান শেষে (সফল/ব্যর্থ যা-ই হোক) exit node ছেড়ে দিই — যাতে cache/screenshot আপলোড
+      # ফোন ছাড়াই সরাসরি হয় (ফোন অফলাইন হলেও আটকে না থাকে)
+      - name: Release exit node
+        if: ${{ always() && vars.USE_TAILSCALE == 'true' }}
+        continue-on-error: true
+        run: sudo tailscale set --exit-node=
 
       - name: Save bot cache
         if: always()
