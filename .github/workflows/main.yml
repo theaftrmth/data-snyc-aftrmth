@@ -117,7 +117,7 @@ jobs:
           HEADLESS: false
           PYTHONUNBUFFERED: 1
           MAX_RUN_MINUTES: 235    # ← রান-ডিউরেশনের আসল নব এখানে (৩ঘ ৫৫মি)
-        run: xvfb-run python benosi.py
+        run: xvfb-run python aftrmth.py
 
       # রান শেষে (সফল/ব্যর্থ যা-ই হোক) exit node ছেড়ে দিই — যাতে cache/screenshot আপলোড
       # ফোন ছাড়াই সরাসরি হয় (ফোন অফলাইন হলেও আটকে না থাকে)
