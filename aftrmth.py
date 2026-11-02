@@ -1,3 +1,19 @@
+"""
+benosi.py — X News Bot (পোস্টিং/যাচাই স্তর রিডিজাইন করা)
+
+মূল পরিবর্তন:
+  ১. পোস্ট "সফল" ধরা হয় শুধু X-এর CreateTweet উত্তরে tweet id এলে (ক্লিক হলেই আর না)।
+  ২. কম্পোজার সবসময় #layers (মোডাল) বা পেজ — যেটা আছে — তার ভেতর থেকে ধরা হয়;
+     পেছনের লুকানো বক্সে ক্লিক করে mask-এ আটকে যাওয়ার সমস্যা শেষ।
+  ৩. ক্লিক আটকালে ৩০ সেকেন্ড অপেক্ষা না করে ৮ সেকেন্ডে ধরে, কে আটকাচ্ছে সেটা লগ + স্ক্রিনশট করে,
+     তারপর focus / Ctrl+Enter দিয়ে এগোয়।
+  ৪. স্ক্যানের সময়ই টুইটের status URL, লাইক/ভিউ (aria-label থেকে সঠিক সংখ্যা), ছবির লিংক,
+     ভিডিও আছে কিনা — সব সংগ্রহ হয়। পরে টাইমলাইন রিলোড করে টেক্সট মেলানোর দরকার নেই।
+  ৫. ছবি/ভিডিও সরাসরি file input-এ (মেনু ছাড়া)।
+  ৬. ক্যাপশন থেকে অদৃশ্য ক্যারেক্টার সরানো হয়, বক্সে কী লেখা হলো তা পড়ে মিলিয়ে লগ করা হয়।
+  ৭. পরপর কয়েকবার পোস্ট ব্যর্থ হলে বা সেশন মরলে রান exit code 1-এ ফেল করে (GitHub-এ লাল দেখাবে)।
+  ৮. শুরুতেই "কোন অ্যাকাউন্টে লগইন" লগ হয়; EXPECTED_HANDLE env দিলে না মিললে থেমে যায়।
+"""
 import time
 import random
 import re
@@ -7,6 +23,8 @@ import hashlib
 import requests
 import subprocess
 import json
+import sys
+import traceback
 from datetime import datetime, timezone
 import pytz
 from playwright.sync_api import sync_playwright
@@ -20,7 +38,7 @@ BD_TZ = pytz.timezone("Asia/Dhaka")
 SOURCES_STR = os.environ.get("SOURCES")
 if not SOURCES_STR:
     print("❌ SOURCES environment variable not set. Bot cannot run.")
-    exit(1)
+    sys.exit(1)
 SOURCES = [s.strip() for s in SOURCES_STR.split(",") if s.strip()]
 print(f"✅ Loaded {len(SOURCES)} sources from environment.")
 
@@ -42,12 +60,21 @@ REPLIED_CACHE = "replied_cache.txt"
 CAPTCHA_LOCK_FILE = "captcha_lock.txt"
 DAILY_LIMIT_FILE = "daily_post_limit.json"
 TOPIC_MEMORY_FILE = "topic_memory.json"
-SESSION_CACHE_FILE = "session_state.json"   # নতুন: Playwright নেটিভ storage_state ক্যাশ
+SESSION_CACHE_FILE = "session_state.json"   # Playwright নেটিভ storage_state ক্যাশ
 os.makedirs(MEDIA_DIR, exist_ok=True)
+
+# এই রানে যেসব টুইট পোস্ট করতে গিয়ে ব্যর্থ হয়েছে — একই রানে বারবার সেগুলোই বাছা বন্ধ
+RUN_SKIP = set()
+
+
+def _short(e, n=160):
+    """এক্সেপশনের প্রথম লাইনটুকু — লগ ছোট রাখতে।"""
+    lines = str(e).strip().splitlines()
+    return (lines[0] if lines else e.__class__.__name__)[:n]
 
 
 # ──────────────────────────────────────────────
-# DAILY POST LIMIT (40–48 posts per day)
+# DAILY POST LIMIT (18–22 posts per day — অফিস-আওয়ার স্ট্র্যাটেজি)
 # ──────────────────────────────────────────────
 def get_daily_limit():
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -57,9 +84,9 @@ def get_daily_limit():
                 data = json.load(f)
             if data.get("date") == today_str:
                 return data["target"], data["count"]
-        except:
+        except Exception:
             pass
-    target = random.randint(40, 48)
+    target = random.randint(18, 22)
     data = {"date": today_str, "target": target, "count": 0}
     with open(DAILY_LIMIT_FILE, "w") as f:
         json.dump(data, f)
@@ -168,17 +195,6 @@ def load_deepseek_session():
     return None
 
 
-def apply_deepseek_cookies(context):
-    """একই browser context-এ DeepSeek-এর কুকি ইনজেক্ট করে (X সেশনের পাশাপাশি)।"""
-    ds_session = load_deepseek_session()
-    if ds_session and "cookies" in ds_session:
-        try:
-            context.add_cookies(ds_session["cookies"])
-            print(f"✅ DeepSeek cookies injected into context: {len(ds_session['cookies'])}")
-        except Exception as e:
-            print(f"❌ Failed to inject DeepSeek cookies: {e}")
-
-
 def validate_session():
     if os.path.exists(SESSION_CACHE_FILE):
         return True
@@ -242,7 +258,7 @@ def check_captcha(page):
             page.screenshot(path=f"captcha_debug_elem_{int(time.time())}.png")
             set_captcha_lock()
             return True
-    except:
+    except Exception:
         pass
     try:
         page_text = page.inner_text('body').lower()
@@ -256,7 +272,7 @@ def check_captcha(page):
                 page.screenshot(path=f"captcha_debug_text_{int(time.time())}.png")
                 set_captcha_lock()
                 return True
-    except:
+    except Exception:
         pass
     current_url = page.url.lower()
     if "challenge" in current_url or "captcha" in current_url:
@@ -268,13 +284,54 @@ def check_captcha(page):
 
 
 def check_session_dead(page):
-    """X সেশন মরে গেলে login/i/flow/login-এ redirect করে — তখন ক্যাশ ক্লিয়ার
-    করতে হবে যেন পরের রান fresh Secret নেয়।"""
+    """সেশন মরেছে কিনা — (ক) URL লগইনে redirect হলে, অথবা (খ) সাইডবার নেই কিন্তু লগইন-লিংক আছে
+    (guest layout)। দুটোর কোনোটাই অস্পষ্ট অবস্থায় 'মরেছে' ধরে না — যাতে ভুল ফেলস-অ্যালার্ম না হয়।"""
     url = page.url.lower()
-    if "/login" in url:
+    if "/login" in url or "/i/flow/login" in url:
         print("❌ Session dead — login page এ redirect.")
         page.screenshot(path=f"captcha_debug_{int(time.time())}.png")
         return True
+    try:
+        has_nav = page.locator(
+            '[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="SideNav_NewTweet_Button"]'
+        ).count() > 0
+        has_login_wall = page.locator('a[href="/login"], [data-testid="loginButton"]').count() > 0
+        if (not has_nav) and has_login_wall:
+            print("❌ Session dead — সাইডবার নেই, লগইন-ওয়াল দেখা যাচ্ছে (guest layout)।")
+            page.screenshot(path=f"captcha_debug_guest_{int(time.time())}.png")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def verify_login_and_identity(page, retries=2):
+    """শুরুতেই যাচাই: আসলে লগইন আছে কিনা + কোন @handle-এ। EXPECTED_HANDLE env থাকলে মিলিয়ে দেখে।"""
+    expected = os.environ.get("EXPECTED_HANDLE", "").strip().lstrip("@").lower()
+    for attempt in range(1, retries + 2):
+        try:
+            page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector('[data-testid="SideNav_AccountSwitcher_Button"]', timeout=25000)
+            txt = page.locator('[data-testid="SideNav_AccountSwitcher_Button"]').first.inner_text(timeout=5000)
+            m = re.search(r'@(\w+)', txt or "")
+            handle = m.group(1) if m else None
+            print(f"👤 লগইন করা অ্যাকাউন্ট: @{handle if handle else '(handle পড়া যায়নি)'}")
+            if expected and handle and handle.lower() != expected:
+                print(f"❌ প্রত্যাশিত @{expected}, কিন্তু লগইন আছে @{handle} — ভুল অ্যাকাউন্টে পোস্ট এড়াতে থামছি।")
+                return False
+            if expected and not handle:
+                print("⚠️ handle পড়া যায়নি, তাই EXPECTED_HANDLE মেলানো গেল না — চালিয়ে যাচ্ছি।")
+            return True
+        except Exception as e:
+            print(f"⚠️ লগইন যাচাই ব্যর্থ (চেষ্টা {attempt}): {_short(e)}")
+            if check_session_dead(page):
+                break
+            time.sleep(5)
+    try:
+        page.screenshot(path=f"captcha_debug_login_{int(time.time())}.png")
+    except Exception:
+        pass
+    print("❌ লগইন নিশ্চিত করা যায়নি (সেশন মৃত/কুকি ভুল/ব্লক) — পোস্ট না করে থামছি।")
     return False
 
 
@@ -329,8 +386,18 @@ def is_too_short(text, min_chars=40):
 
 
 def is_forbidden_topic(text):
-    """FORBIDDEN_KEYWORDS-এ উল্লেখিত শব্দগুলো থাকলে টুইট পোস্ট হবে না।"""
-    return any(kw in text.lower() for kw in FORBIDDEN_KEYWORDS)
+    """FORBIDDEN_KEYWORDS-এ উল্লেখিত শব্দগুলো থাকলে টুইট পোস্ট হবে না।
+    ছোট শব্দ (≤৩ অক্ষর, যেমন "ki") শুধু পূর্ণ শব্দ হিসেবে মেলে — আগে সাবস্ট্রিং মেলাত বলে
+    "BREAKING", "killed", "Pakistan", "taking" সহ বহু দরকারি টুইট ভুলে বাদ পড়ত।
+    লম্বা শব্দ (india, kaikan...) আগের মতোই সাবস্ট্রিং।"""
+    low = text.lower()
+    for kw in FORBIDDEN_KEYWORDS:
+        if len(kw) <= 3:
+            if re.search(r'(?<!\w)' + re.escape(kw) + r'(?!\w)', low):
+                return True
+        elif kw in low:
+            return True
+    return False
 
 
 def is_pinned_tweet(tweet_element):
@@ -341,7 +408,7 @@ def is_pinned_tweet(tweet_element):
         outer = tweet_element.inner_html().lower()
         if "pinned" in outer and "pinnedtweet" in outer.replace(" ", ""):
             return True
-    except:
+    except Exception:
         pass
     return False
 
@@ -353,7 +420,7 @@ def is_thread_continuation(tweet_element):
             return True
         if tweet_element.query_selector('[data-testid="tweet_reply_context"]'):
             return True
-    except:
+    except Exception:
         pass
     return False
 
@@ -363,9 +430,9 @@ def is_retweet(tweet_element):
         ctx = tweet_element.query_selector('[data-testid="socialContext"]')
         if ctx:
             t = ctx.inner_text().lower()
-            if "retweet" in t or "retweeted" in t:
+            if "retweet" in t or "retweeted" in t or "reposted" in t:
                 return True
-    except:
+    except Exception:
         pass
     return False
 
@@ -379,9 +446,105 @@ def get_tweet_age_minutes(tweet_element):
                 tweet_time = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 return int((now - tweet_time).total_seconds() / 60)
-    except:
+    except Exception:
         pass
     return 9999
+
+
+# ──────────────────────────────────────────────
+# টুইট থেকে তথ্য সংগ্রহ (স্ক্যানের সময়ই সব নেওয়া হয় — পরে রিলোড/টেক্সট-ম্যাচ লাগে না)
+# ──────────────────────────────────────────────
+def parse_count(text):
+    if not text:
+        return 0
+    text = text.strip().upper().replace(",", "")
+    try:
+        if "K" in text:
+            return int(float(text.replace("K", "")) * 1000)
+        elif "M" in text:
+            return int(float(text.replace("M", "")) * 1_000_000)
+        return int(text)
+    except Exception:
+        return 0
+
+
+def get_tweet_view_count(tweet):
+    """পুরনো আন্দাজি পদ্ধতি — শুধু aria-label না পেলে ফলব্যাক।"""
+    try:
+        view_btn = tweet.query_selector('a[href*="/analytics"], [data-testid="analyticsButton"]')
+        if view_btn:
+            label = view_btn.get_attribute("aria-label") or view_btn.inner_text()
+            return parse_count(label)
+        stats = tweet.query_selector_all('div[data-testid$="count"]')
+        return sum(parse_count(s.inner_text()) for s in stats) * 50
+    except Exception:
+        return 0
+
+
+def get_tweet_stats(tweet):
+    """অ্যাকশন-বারের aria-label থেকে সঠিক সংখ্যা, যেমন:
+    '264 replies, 1795 reposts, 8210 likes, 439 bookmarks, 277427 views'"""
+    stats = {"likes": 0, "views": 0, "reposts": 0, "replies": 0}
+    label = ""
+    try:
+        label = tweet.evaluate(
+            r"""el => { const g = el.querySelector('[role="group"][aria-label]');
+                        return g ? (g.getAttribute('aria-label') || '') : ''; }"""
+        ) or ""
+    except Exception:
+        label = ""
+    patterns = (
+        ("likes", r'([\d,\.]+)\s+likes?'),
+        ("views", r'([\d,\.]+)\s+views?'),
+        ("reposts", r'([\d,\.]+)\s+reposts?'),
+        ("replies", r'([\d,\.]+)\s+repl(?:y|ies)'),
+    )
+    found = False
+    for key, pat in patterns:
+        m = re.search(pat, label, re.I)
+        if m:
+            try:
+                stats[key] = int(m.group(1).replace(",", "").split(".")[0])
+                found = True
+            except Exception:
+                pass
+    if not found:   # aria-label না মিললে পুরনো পদ্ধতি
+        try:
+            like_btn = tweet.query_selector('button[data-testid="like"]')
+            stats["likes"] = parse_count(like_btn.inner_text()) if like_btn else 0
+        except Exception:
+            pass
+        stats["views"] = get_tweet_view_count(tweet)
+    return stats
+
+
+def get_tweet_status_url(tweet):
+    try:
+        url = tweet.evaluate(
+            r"""el => { const t = el.querySelector('time');
+                        const a = t ? t.closest('a') : null;
+                        return a ? a.href : null; }"""
+        )
+        if url and "/status/" in url:
+            return url
+    except Exception:
+        pass
+    return None
+
+
+def get_tweet_media_info(tweet):
+    """(ছবির URL তালিকা, ভিডিও আছে কিনা)"""
+    try:
+        info = tweet.evaluate(
+            r"""el => ({
+                imgs: Array.from(el.querySelectorAll('img[src*="pbs.twimg.com/media"]')).map(i => i.src),
+                video: !!(el.querySelector('video') || el.querySelector('[data-testid="videoPlayer"]'))
+            })"""
+        )
+        imgs = list(dict.fromkeys(info.get("imgs") or []))
+        return imgs, bool(info.get("video"))
+    except Exception:
+        return [], False
 
 
 # ──────────────────────────────────────────────
@@ -397,32 +560,6 @@ def has_news_keywords(text):
         "crisis", "emergency", "peace", "deal", "treaty",
     ]
     return any(kw in text.lower() for kw in keywords)
-
-
-def parse_count(text):
-    if not text:
-        return 0
-    text = text.strip().upper().replace(",", "")
-    try:
-        if "K" in text:
-            return int(float(text.replace("K", "")) * 1000)
-        elif "M" in text:
-            return int(float(text.replace("M", "")) * 1_000_000)
-        return int(text)
-    except:
-        return 0
-
-
-def get_tweet_view_count(tweet):
-    try:
-        view_btn = tweet.query_selector('a[href*="/analytics"], [data-testid="analyticsButton"]')
-        if view_btn:
-            label = view_btn.get_attribute("aria-label") or view_btn.inner_text()
-            return parse_count(label)
-        stats = tweet.query_selector_all('div[data-testid$="count"]')
-        return sum(parse_count(s.inner_text()) for s in stats) * 50
-    except:
-        return 0
 
 
 def score_tweet(text, likes, views=0, age_minutes=9999):
@@ -477,7 +614,7 @@ def load_topic_memory():
     try:
         with open(TOPIC_MEMORY_FILE, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return []
 
 
@@ -503,32 +640,8 @@ def add_to_topic_memory(text):
 
 
 # ──────────────────────────────────────────────
-# VIDEO / MEDIA (fixed: reliable multi-video + mixed support)
+# MEDIA (স্ক্যানে পাওয়া তথ্য থেকে সরাসরি ডাউনলোড — টাইমলাইন রিলোড লাগে না)
 # ──────────────────────────────────────────────
-def check_video_in_article(page, tweet_index):
-    try:
-        return bool(page.evaluate(f"""() => {{
-            const a = document.querySelectorAll('article[data-testid="tweet"]')[{tweet_index}];
-            if (!a) return false;
-            return !!(a.querySelector('video') || a.querySelector('div[data-testid="videoPlayer"]'));
-        }}"""))
-    except:
-        return False
-
-
-def get_tweet_url_from_article(page, tweet_index):
-    try:
-        url = page.evaluate(f"""() => {{
-            const a = document.querySelectorAll('article[data-testid="tweet"]')[{tweet_index}];
-            if (!a) return null;
-            const link = a.querySelector('a[href*="/status/"]');
-            return link ? 'https://x.com' + link.getAttribute('href') : null;
-        }}""")
-        return url
-    except:
-        return None
-
-
 def download_media(url, filename):
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -542,40 +655,15 @@ def download_media(url, filename):
     return None
 
 
-# ──────────────────────────────────────────────
-# FALLBACK IMAGE (media-less পোস্টের জন্য) — run শুরুতে একবার ডাউনলোড, পুরো ৬ ঘণ্টা reuse
-# ──────────────────────────────────────────────
-def download_fallback_image():
-    url = os.environ.get("FALLBACK_IMAGE_URL")
-    if not url:
-        print("ℹ️ FALLBACK_IMAGE_URL সেট করা নেই — media-less পোস্টে fallback ছবি ব্যবহার হবে না।")
-        return None
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if r.status_code == 200 and r.content:
-            ext = ".jpg"
-            content_type = r.headers.get("Content-Type", "").lower()
-            if "gif" in content_type:
-                ext = ".gif"
-            elif "png" in content_type:
-                ext = ".png"
-            elif "webp" in content_type:
-                ext = ".webp"
-            elif url.lower().split("?")[0].endswith(".gif"):
-                ext = ".gif"
-            if ext == ".gif" and len(r.content) > 15 * 1024 * 1024:
-                print(f"⚠️ Fallback GIF {len(r.content) / 1024 / 1024:.1f}MB — X-এর ~15MB লিমিট ছাড়িয়ে গেছে, ব্যবহার হবে না।")
-                return None
-            path = os.path.join(MEDIA_DIR, f"fallback_image{ext}")
-            with open(path, "wb") as f:
-                f.write(r.content)
-            print(f"✅ Fallback image downloaded: {path} ({len(r.content)} bytes)")
-            return path
-        else:
-            print(f"⚠️ Fallback image download failed: HTTP {r.status_code}")
-    except Exception as e:
-        print(f"⚠️ Fallback image download failed: {e}")
-    return None
+def download_images(urls, limit=4):
+    paths = []
+    for i, src in enumerate(urls[:limit]):
+        src = re.sub(r'name=\w+', 'name=large', src)
+        path = download_media(src, f"img_{int(time.time())}_{i}.jpg")
+        if path:
+            paths.append(path)
+            print(f"  📥 Image {i + 1} downloaded.")
+    return paths
 
 
 def download_videos_from_tweet(tweet_url, max_attempts=3):
@@ -612,7 +700,7 @@ def download_videos_from_tweet(tweet_url, max_attempts=3):
                     for vf in valid_files:
                         try:
                             os.remove(vf)
-                        except:
+                        except Exception:
                             pass
                     return "TOO_LARGE"
                 if valid_files:
@@ -637,63 +725,57 @@ def download_videos_from_tweet(tweet_url, max_attempts=3):
     return []
 
 
-def extract_media_urls_safely(page, tweet_index):
+def prepare_media(cand):
+    """নির্বাচিত টুইটের মিডিয়া ডাউনলোড। ফেরত: ফাইল-পাথের তালিকা, অথবা "TOO_LARGE"।
+    X-এর নিয়ম: ভিডিও থাকলে সাথে ছবি মেশানো যায় না — তাই ভিডিও পেলে ছবি বাদ।"""
     media_paths = []
-    try:
-        # ---------- ১. ভিডিও ডাউনলোড ----------
-        has_vid = check_video_in_article(page, tweet_index)
-        if has_vid:
-            tweet_url = get_tweet_url_from_article(page, tweet_index)
-            print(f"  🎬 Video(s) detected, downloading all with yt-dlp: {tweet_url}")
-            if tweet_url:
-                video_paths = download_videos_from_tweet(tweet_url)
-                if video_paths == "TOO_LARGE":
-                    return "TOO_LARGE"
-                if video_paths:
-                    media_paths.extend(video_paths)
-            else:
-                print("  ⚠️ Tweet URL not found, skipping video download.")
-        # ---------- ২. ছবি ডাউনলোড ----------
-        urls = page.evaluate(f"""() => {{
-            const a = document.querySelectorAll('article[data-testid="tweet"]')[{tweet_index}];
-            if (!a) return [];
-            const imgs = a.querySelectorAll('img[src*="pbs.twimg.com/media"]');
-            return Array.from(imgs).map(i => i.src);
-        }}""")
-        for i, src in enumerate(urls or []):
-            src = re.sub(r'name=\w+', 'name=large', src)
-            path = download_media(src, f"img_{int(time.time())}_{i}.jpg")
-            if path:
-                media_paths.append(path)
-                print(f"  📥 Image {i+1} downloaded.")
-        # ---------- ৩. সেফটি ট্রিম (টুইটারের সর্বোচ্চ ৪টি মিডিয়া) ----------
-        if len(media_paths) > 4:
-            print(f"  ⚠️ Combined media count {len(media_paths)} exceeds 4, trimming to first 4.")
-            for extra in media_paths[4:]:
-                try:
-                    os.remove(extra)
-                except:
-                    pass
-            media_paths = media_paths[:4]
-    except Exception as e:
-        print(f"  ⚠️ Media extract error: {e}")
+    if cand.get("has_video") and cand.get("url"):
+        print(f"  🎬 Video detected, yt-dlp: {cand['url']}")
+        vids = download_videos_from_tweet(cand["url"])
+        if vids == "TOO_LARGE":
+            return "TOO_LARGE"
+        if vids:
+            media_paths = vids[:1]   # একটা ভিডিওই যথেষ্ট ও নিরাপদ
+    elif cand.get("has_video"):
+        print("  ⚠️ ভিডিও আছে কিন্তু status URL পাওয়া যায়নি — ভিডিও বাদ।")
+    if not media_paths and cand.get("imgs"):
+        media_paths = download_images(cand["imgs"], limit=4)
     return media_paths
 
 
-def find_matching_tweet_index(page, target_text, search_range=10):
+# ──────────────────────────────────────────────
+# FALLBACK IMAGE (media-less পোস্টের জন্য) — run শুরুতে একবার ডাউনলোড, পুরো রান জুড়ে reuse
+# ──────────────────────────────────────────────
+def download_fallback_image():
+    url = os.environ.get("FALLBACK_IMAGE_URL")
+    if not url:
+        print("ℹ️ FALLBACK_IMAGE_URL সেট করা নেই — media-less পোস্টে fallback ছবি ব্যবহার হবে না।")
+        return None
     try:
-        target = target_text.strip()
-        tweets = page.query_selector_all('article[data-testid="tweet"]')
-        for i, tweet in enumerate(tweets[:search_range]):
-            try:
-                text_el = tweet.query_selector('div[data-testid="tweetText"]')
-                txt = text_el.inner_text().strip() if text_el else ""
-                if txt and txt == target:
-                    return i
-            except:
-                continue
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        if r.status_code == 200 and r.content:
+            ext = ".jpg"
+            content_type = r.headers.get("Content-Type", "").lower()
+            if "gif" in content_type:
+                ext = ".gif"
+            elif "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif url.lower().split("?")[0].endswith(".gif"):
+                ext = ".gif"
+            if ext == ".gif" and len(r.content) > 15 * 1024 * 1024:
+                print(f"⚠️ Fallback GIF {len(r.content) / 1024 / 1024:.1f}MB — X-এর ~15MB লিমিট ছাড়িয়ে গেছে, ব্যবহার হবে না।")
+                return None
+            path = os.path.join(MEDIA_DIR, f"fallback_image{ext}")
+            with open(path, "wb") as f:
+                f.write(r.content)
+            print(f"✅ Fallback image downloaded: {path} ({len(r.content)} bytes)")
+            return path
+        else:
+            print(f"⚠️ Fallback image download failed: HTTP {r.status_code}")
     except Exception as e:
-        print(f"  ⚠️ Tweet re-match error: {e}")
+        print(f"⚠️ Fallback image download failed: {e}")
     return None
 
 
@@ -745,7 +827,7 @@ def _deepseek_find_textarea(page, timeout=8000):
             el = page.wait_for_selector(sel, timeout=timeout)
             if el and el.is_visible():
                 return el
-        except:
+        except Exception:
             continue
     return None
 
@@ -805,7 +887,7 @@ def deepseek_rewrite(context, prompt: str) -> str | None:
             if btn and btn.is_visible() and btn.is_enabled():
                 btn.click()
                 sent = True
-        except:
+        except Exception:
             pass
         if not sent:
             page.keyboard.press("Enter")
@@ -926,8 +1008,71 @@ Example: 2"""
 
 
 # ──────────────────────────────────────────────
-# CAPTION GENERATION (DeepSeek Instant + Search + DeepThink, নতুন প্রম্প্ট)
+# CAPTION: তৈরি + পরিষ্কার (অদৃশ্য ক্যারেক্টার সরানো) + ২৮০ (X-ওজন) সীমায় আনা
 # ──────────────────────────────────────────────
+_INVISIBLE_RE = re.compile('[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad]')
+
+
+def sanitize_caption(text):
+    """DeepSeek/ওয়েব থেকে আসা টেক্সটে লুকানো zero-width/direction ক্যারেক্টার থাকতে পারে —
+    এগুলো X-এর কম্পোজারে সমস্যা করতে পারে। সরিয়ে নিই।"""
+    found = len(_INVISIBLE_RE.findall(text))
+    if found:
+        print(f"  🧽 ক্যাপশন থেকে {found}টি অদৃশ্য ক্যারেক্টার সরানো হলো।")
+    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\u00a0', ' ')
+    text = _INVISIBLE_RE.sub('', text)
+    text = re.sub(r'[ \t]+\n', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def x_weighted_len(text):
+    """X-এর অক্ষর-গণনার মোটামুটি হিসাব: URL = ২৩, CJK/ইমোজি = ২, বাকি = ১।"""
+    text = re.sub(r'https?://\S+', 'x' * 23, text)
+    total = 0
+    for ch in text:
+        o = ord(ch)
+        if (0x1100 <= o <= 0x11FF or 0x2600 <= o <= 0x27BF or 0x2E80 <= o <= 0xD7FF
+                or 0xF900 <= o <= 0xFAFF or 0xFE30 <= o <= 0xFE6F or 0xFF00 <= o <= 0xFF60
+                or 0xFFE0 <= o <= 0xFFE6 or o >= 0x1F000):
+            total += 2
+        else:
+            total += 1
+    return total
+
+
+def fit_caption(text, limit=280):
+    text = text.strip()
+    if x_weighted_len(text) <= limit:
+        return text
+    parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(parts) > 1:
+        head = parts[0]
+        rest = " ".join(parts[1:])
+        sentences = re.split(r'(?<=[.!?])\s+', rest)
+        out = head
+        first = True
+        for s in sentences:
+            cand = out + ("\n\n" if first else " ") + s
+            if x_weighted_len(cand) <= limit:
+                out = cand
+                first = False
+            else:
+                break
+        if x_weighted_len(out) <= limit:
+            print("  ✂️ ক্যাপশন ছোট করা হলো (শেষের বাক্যগুলো বাদ)।")
+            return out
+        text = head
+    out = ""
+    for w in text.split(" "):
+        cand = (out + " " + w).strip()
+        if x_weighted_len(cand + "…") > limit:
+            break
+        out = cand
+    print("  ✂️ ক্যাপশন ২৮০ সীমায় কাটা হলো।")
+    return out.rstrip(".,;: ") + "…"
+
+
 def build_final_caption(original_text, context=None):
     prompt = f"""IMPORTANT: All output must be in simple words.
 Think step by step: Internally create 3 distinct drafts, each with a main sentence and 2, 3 detailed sentences everything under 280 total characters with key facts, in simple words. Then critically compare them—check for conciseness, factual accuracy, and strict character limit. Select the best one or merge the strongest parts into a single final version. After that, output only the final two lines in the format below, with no extra text.
@@ -950,9 +1095,7 @@ Tweet:
     else:
         result = None
     if result:
-        caption = result.strip()
-        caption = re.sub(r'\n{3,}', '\n\n', caption)   # ফাঁকা লাইন ঠিক রাখি
-        return caption
+        return result.strip()
     print("  ⚠️ DeepSeek failed, posting original tweet text as fallback...")
     return clean_text(original_text)
 
@@ -972,175 +1115,338 @@ def human_mouse_move(page, target_x, target_y, steps=15):
         time.sleep(random.uniform(0.005, 0.015))
 
 
-def human_type(element, text):
-    element.click()
+def _move_to(page, locator):
+    try:
+        box = locator.bounding_box()
+        if box:
+            human_mouse_move(page, box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+    except Exception:
+        pass
+
+
+def human_type_text(page, text):
+    """ফোকাস করা বক্সে অক্ষর অক্ষর করে টাইপ (এলিমেন্টে আলাদা ক্লিক লাগে না)।"""
     time.sleep(random.uniform(0.3, 0.8))
     for char in text:
-        element.type(char, delay=random.randint(40, 120))
+        page.keyboard.type(char, delay=random.randint(40, 120))
         if random.random() < 0.05:
             time.sleep(random.uniform(0.3, 0.9))
     time.sleep(random.uniform(0.5, 1.2))
 
 
 # ──────────────────────────────────────────────
-# POSTING — attaches multiple media files (X-এর নতুন Upload menu সহ)
+# POSTING — রিডিজাইন: scope-ভিত্তিক কম্পোজার + CreateTweet উত্তরে যাচাই
 # ──────────────────────────────────────────────
-def type_and_submit(page, text, media_paths):
-    viewport = page.viewport_size
-    human_mouse_move(page, viewport['width']//2, viewport['height']//2)
-    textarea = page.wait_for_selector(
-        'div[data-testid="tweetTextarea_0"]', timeout=25000
-    )
-    box = textarea.bounding_box()
-    human_mouse_move(page, box['x'] + box['width']//2, box['y'] + box['height']//2)
-    human_type(textarea, text)
-    page.wait_for_timeout(random.randint(800, 1500))
+class PreClickError(Exception):
+    """Post বাটনে ক্লিকের আগের ধাপের ব্যর্থতা — নিরাপদে অন্য পদ্ধতিতে আবার চেষ্টা করা যায়
+    (কিছু পোস্ট হয়নি নিশ্চিত)। ক্লিকের পরের অনিশ্চয়তায় কখনো রিট্রাই করা হয় না — ডাবল পোস্ট এড়াতে।"""
 
-    if media_paths:
-        attach_btn = page.query_selector('button[aria-label="Add photos or video"]')
-        if attach_btn:
-            attached = False
 
-            # ── Flow 1: নতুন menu system — attach → "Upload" menuitem ──
+POPUP_BUTTONS = ["Not now", "Maybe later", "Skip for now", "Dismiss"]
+
+
+def _debug_shot(page, tag):
+    # ফাইলের নাম attach_fail_*.png — workflow এটা আপলোড করে
+    path = f"attach_fail_{tag}_{int(time.time())}.png"
+    try:
+        page.screenshot(path=path)
+        print(f"  📸 স্ক্রিনশট: {path}")
+    except Exception as e:
+        print(f"  ⚠️ স্ক্রিনশট ব্যর্থ: {_short(e)}")
+
+
+def describe_overlays(page):
+    """#layers-এ এখন কী আছে — mask কয়টা, কোনো ডায়ালগ থাকলে তার টেক্সট (ডিবাগের জন্য)।"""
+    try:
+        return page.evaluate(r"""() => {
+            const L = document.querySelector('#layers');
+            if (!L) return 'no #layers';
+            const dlgs = Array.from(L.querySelectorAll('[role="dialog"], [role="alertdialog"]'));
+            const masks = L.querySelectorAll('[data-testid="mask"]').length;
+            const t = dlgs.map(d => (d.innerText || '').replace(/\s+/g, ' ').slice(0, 140));
+            return 'masks=' + masks + ' dialogs=' + dlgs.length + ' ' + JSON.stringify(t);
+        }""")
+    except Exception as e:
+        return f"describe_overlays failed: {_short(e)}"
+
+
+def describe_blocker(page, locator):
+    """এলিমেন্টের মাঝখানে আসলে কোন এলিমেন্ট আছে (ক্লিক কে আটকাচ্ছে) — ওপরের দিকের চেইনসহ।"""
+    try:
+        box = locator.bounding_box()
+        if not box:
+            return "bounding box নেই"
+        cx = box['x'] + box['width'] / 2
+        cy = box['y'] + box['height'] / 2
+        return page.evaluate(r"""([x, y]) => {
+            const el = document.elementFromPoint(x, y);
+            if (!el) return 'elementFromPoint=null';
+            const chain = [];
+            let n = el;
+            for (let i = 0; i < 6 && n; i++) {
+                const tid = n.getAttribute ? n.getAttribute('data-testid') : null;
+                chain.push((n.tagName || '') + (tid ? '[' + tid + ']' : '') + (n.id ? '#' + n.id : ''));
+                n = n.parentElement;
+            }
+            return chain.join(' < ');
+        }""", [cx, cy])
+    except Exception as e:
+        return f"describe_blocker failed: {_short(e)}"
+
+
+def dismiss_popups(page):
+    """'Not now' / 'Maybe later' ধরনের পপআপ থাকলে বন্ধ করে (কম্পোজারের পথ খোলা রাখতে)।"""
+    for name in POPUP_BUTTONS:
+        try:
+            loc = page.locator('#layers').get_by_role("button", name=name, exact=True)
+            if loc.count() > 0 and loc.first.is_visible():
+                loc.first.click(timeout=2000)
+                print(f"  🧹 পপআপ বন্ধ করা হলো: '{name}'")
+                page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+
+def read_toast(page):
+    try:
+        return page.locator('[data-testid="toast"]').first.inner_text(timeout=1500)
+    except Exception:
+        return ""
+
+
+def get_composer_scope(page, wait_modal_ms=0):
+    """কম্পোজার কোথায়: #layers-এর মোডালে থাকলে সেটাই (পেছনের inline বক্স নয়), নইলে পেজে।
+    এই scope ধরেই সব selector চলে — এতে mask-এর পেছনের বক্সে ক্লিক করার ভুল আর হয় না।"""
+    modal_sel = '#layers [data-testid="tweetTextarea_0"]'
+    if wait_modal_ms:
+        try:
+            page.wait_for_selector(modal_sel, timeout=wait_modal_ms)
+        except Exception:
+            pass
+    if page.locator(modal_sel).count() > 0:
+        return page.locator('#layers'), "modal"
+    return page.locator('body'), "inline"
+
+
+def _norm_ws(s):
+    return re.sub(r'\s+', '', s or "")
+
+
+def attach_media(page, scope, media_paths):
+    """ছবি/ভিডিও সংযুক্তি। প্রথমে লুকানো file input-এ সরাসরি (কোনো ক্লিক নেই, mask আটকাতে পারে না);
+    না হলে ছবি-বাটন চেপে file chooser। ফেরত: true/false।"""
+    attached = False
+    try:
+        inputs = scope.locator('input[type="file"][data-testid="fileInput"], input[type="file"]')
+        if inputs.count() > 0:
+            inputs.first.set_input_files(media_paths, timeout=15000)
+            attached = True
+            print(f"  🎞 {len(media_paths)} media ফাইল queued (সরাসরি input)।")
+    except Exception as e:
+        print(f"  ⚠️ সরাসরি input ব্যর্থ: {_short(e)}")
+    if not attached:
+        try:
+            btn = scope.locator('button[aria-label="Add photos or video"]').first
+            with page.expect_file_chooser(timeout=10000) as fc_info:
+                btn.click(timeout=6000)
+            fc_info.value.set_files(media_paths)
+            attached = True
+            print(f"  🎞 {len(media_paths)} media ফাইল queued (file chooser)।")
+        except Exception as e:
+            print(f"  ⚠️ file chooser পদ্ধতিও ব্যর্থ: {_short(e)}")
+    if not attached:
+        return False
+
+    is_video = any(mp.lower().endswith('.mp4') for mp in media_paths)
+    try:
+        scope.locator('[data-testid="attachments"]').first.wait_for(
+            state="visible", timeout=30000 if is_video else 15000)
+        print("  ✅ Attachment container পাওয়া গেছে।")
+    except Exception:
+        print("  ⚠️ Attachment container দেখা যায়নি।")
+        _debug_shot(page, "post_attach_missing")
+    page.wait_for_timeout(6000 if is_video else random.randint(2500, 4000))
+    return True
+
+
+def click_post_and_verify(page, post_btn, textarea):
+    """Post চেপে X-এর CreateTweet উত্তর ধরে — tweet id এলেই কেবল সফল।
+    এই ফাংশন কখনো exception ছোড়ে না (ক্লিকের পরে রিট্রাই করা বিপজ্জনক)।"""
+    def is_create(r):
+        try:
+            return "CreateTweet" in r.url and r.request.method == "POST"
+        except Exception:
+            return False
+
+    method_used = "click"
+    try:
+        with page.expect_response(is_create, timeout=45000) as info:
             try:
-                with page.expect_file_chooser(timeout=10000) as fc_info:
-                    attach_btn.click()
-                    page.wait_for_timeout(random.randint(500, 900))
-                    upload_item = None
-                    for sel in [
-                        'div[data-testid="Dropdown"] div[role="menuitem"]:has-text("Upload")',
-                        'div[role="menu"] div[role="menuitem"]:has-text("Upload")',
-                        'div[role="menuitem"]:has-text("Upload")',
-                    ]:
-                        try:
-                            upload_item = page.wait_for_selector(sel, timeout=3000)
-                            if upload_item:
-                                break
-                        except Exception:
-                            continue
-                    if upload_item is None:
-                        raise Exception("Upload menu item not found")
-                    upload_item.click()
-                fc_info.value.set_files(media_paths)
-                print(f"  🎞 {len(media_paths)} media file(s) queued (menu flow).")
-                attached = True
+                post_btn.click(timeout=8000)
             except Exception as e:
-                print(f"  ⚠️ Menu flow failed: {e}")
-
-            # ── Flow 2: hidden file input-এ সরাসরি set (সবচেয়ে stable) ──
-            if not attached:
+                blocker = describe_blocker(page, post_btn)
+                print(f"  ⚠️ Post ক্লিক আটকেছে ({_short(e)}) | আটকাচ্ছে: {blocker}")
+                print(f"     overlays: {describe_overlays(page)}")
+                _debug_shot(page, "post_postclick_blocked")
                 try:
-                    inp = (page.query_selector('div[role="dialog"] input[type="file"]')
-                           or page.query_selector('input[type="file"][data-testid="fileInput"]')
-                           or page.query_selector('input[type="file"]'))
-                    if inp:
-                        inp.set_input_files(media_paths)
-                        print(f"  🎞 {len(media_paths)} media file(s) queued (direct input).")
-                        attached = True
-                except Exception as e:
-                    print(f"  ⚠️ Direct input flow failed: {e}")
-
-            # ── Flow 3: পুরনো direct click (যদি X আবার আগের UI-তে ফিরে যায়) ──
-            if not attached:
-                try:
-                    with page.expect_file_chooser(timeout=10000) as fc_info:
-                        attach_btn.click()
-                    fc_info.value.set_files(media_paths)
-                    print(f"  🎞 {len(media_paths)} media file(s) queued (old flow).")
-                    attached = True
-                except Exception as e:
-                    print(f"  ⚠️ Media attach error: {e}")
-
-            # ── খোলা menu থাকলে বন্ধ করি — নাহলে Post click intercept করবে ──
-            try:
-                if page.query_selector('div[role="menu"]'):
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(600)
-            except Exception:
-                pass
-
-            # ── attachment preview wait (আগের মতোই) ──
-            if attached:
-                is_video = any(mp.lower().endswith('.mp4') for mp in media_paths)
-                is_gif = any(mp.lower().endswith('.gif') for mp in media_paths)
-                if is_video:
-                    page.wait_for_timeout(3000)
-                    try:
-                        page.wait_for_selector('div[data-testid="attachments"]', timeout=30000)
-                        print("  ✅ Attachment container found.")
-                    except:
-                        print("  ⚠️ Attachment container not found.")
-                        page.screenshot(path=f"attach_fail_{int(time.time())}.png")
-                    page.wait_for_timeout(45000)
-                    try:
-                        page.wait_for_selector('div[data-testid="attachments"] video', timeout=15000)
-                        print("  ✅ Video preview confirmed.")
-                    except:
-                        print("  ⚠️ Preview not confirmed, continuing anyway.")
-                elif is_gif:
-                    try:
-                        page.wait_for_selector('div[data-testid="attachments"]', timeout=15000)
-                        print("  ✅ Attachment container found (GIF).")
-                    except:
-                        print("  ⚠️ Attachment container not found.")
-                        page.screenshot(path=f"attach_fail_{int(time.time())}.png")
-                    page.wait_for_timeout(random.randint(2500, 4000))
-                else:
-                    page.wait_for_timeout(random.randint(3000, 5000))
-        else:
-            print("  ⚠️ Attach button not found.")
+                    textarea.focus(timeout=3000)
+                except Exception:
+                    pass
+                page.keyboard.press("Control+Enter")
+                method_used = "ctrl+enter"
+        resp = info.value
+    except Exception as e:
+        err = f"CreateTweet-এর উত্তর আসেনি ({_short(e)})"
+        print(f"  ❌ {err}")
+        try:
+            _debug_shot(page, "post_noresponse")
+        except Exception:
+            pass
+        return {"ok": False, "error": err, "uncertain": True}
 
     try:
-        btn = page.wait_for_selector(
-            'div[data-testid="tweetButtonInline"], button[data-testid="tweetButton"]',
-            timeout=8000
-        )
-    except:
-        btn = page.wait_for_selector('button[data-testid="tweetButton"]', timeout=8000)
-    box = btn.bounding_box()
-    human_mouse_move(page, box['x'] + box['width']//2, box['y'] + box['height']//2)
+        status = resp.status
+        data = None
+        body = ""
+        try:
+            data = resp.json()
+        except Exception:
+            try:
+                body = resp.text()[:300]
+            except Exception:
+                body = ""
+        tweet_id = None
+        err_msgs = []
+        if isinstance(data, dict):
+            try:
+                res = data["data"]["create_tweet"]["tweet_results"]["result"]
+                tweet_id = res.get("rest_id") or (res.get("tweet") or {}).get("rest_id")
+            except Exception:
+                pass
+            for er in data.get("errors") or []:
+                try:
+                    err_msgs.append(f"{er.get('code')}: {er.get('message')}")
+                except Exception:
+                    pass
+        if tweet_id:
+            print(f"  ✅ X নিশ্চিত করেছে — tweet id {tweet_id} (https://x.com/i/status/{tweet_id}) [{method_used}]")
+            try:
+                page.wait_for_timeout(random.randint(2000, 4000))
+            except Exception:
+                pass
+            return {"ok": True, "tweet_id": tweet_id}
+        err = f"HTTP {status} | " + (" ; ".join(err_msgs) if err_msgs else f"body={body!r}")
+        toast = read_toast(page)
+        if toast:
+            err += f" | toast={toast!r}"
+        print(f"  ❌ X পোস্ট নেয়নি: {err}")
+        _debug_shot(page, "post_rejected")
+        return {"ok": False, "error": err}
+    except Exception as e:
+        err = f"উত্তর পড়তে সমস্যা ({_short(e)})"
+        print(f"  ❌ {err}")
+        return {"ok": False, "error": err, "uncertain": True}
+
+
+def do_compose(page, text, media_paths, mode):
+    """একটা পদ্ধতিতে পোস্টের পুরো ধাপ। ক্লিকের আগে সমস্যা হলে PreClickError।
+    mode: 'compose_page' = x.com/compose/post, 'home_inline' = হোমের নিজস্ব বক্স।"""
+    url = "https://x.com/compose/post" if mode == "compose_page" else "https://x.com/home"
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(random.randint(3500, 6000))
+    if check_session_dead(page):
+        raise Exception("SESSION_DEAD")
+    if check_captcha(page):
+        raise Exception("CAPTCHA_DETECTED")
+    dismiss_popups(page)
+
+    # ── কম্পোজার খুঁজি ──
+    try:
+        page.wait_for_selector('[data-testid="tweetTextarea_0"]', timeout=25000)
+    except Exception:
+        _debug_shot(page, "post_notextarea")
+        raise PreClickError("লেখার বক্স (tweetTextarea_0) পাওয়া যায়নি")
+    scope, kind = get_composer_scope(page, wait_modal_ms=3000 if mode == "compose_page" else 0)
+    print(f"  🧭 কম্পোজার: {kind} ({mode}) | overlays: {describe_overlays(page)}")
+    textarea = scope.locator('[data-testid="tweetTextarea_0"]').first
+
+    # ── বক্সে ক্লিক (আটকালে কে আটকাচ্ছে লগ করে focus() দিয়ে এগোই) ──
+    _move_to(page, textarea)
+    try:
+        textarea.click(timeout=8000)
+    except Exception as e:
+        blocker = describe_blocker(page, textarea)
+        print(f"  ⚠️ বক্সে ক্লিক আটকেছে ({_short(e)}) | আটকাচ্ছে: {blocker}")
+        _debug_shot(page, "post_click_blocked")
+        try:
+            textarea.focus(timeout=5000)
+        except Exception:
+            raise PreClickError("বক্সে ফোকাসও করা গেল না")
+
+    # ── টাইপ + বক্সে আসলে কী লেখা হলো তা মিলিয়ে দেখা ──
+    human_type_text(page, text)
+    try:
+        typed = textarea.inner_text(timeout=3000)
+    except Exception:
+        typed = ""
+    if not _norm_ws(typed):
+        _debug_shot(page, "post_typed_empty")
+        raise PreClickError("টাইপের পর বক্স খালি")
+    if _norm_ws(typed) != _norm_ws(text):
+        print(f"  ⚠️ বক্সের লেখা ক্যাপশনের সাথে মেলেনি | বক্স={len(typed)} ক্যাপশন={len(text)}")
+        print(f"     বক্সে: {typed[:140]!r}")
+    page.wait_for_timeout(random.randint(800, 1500))
+
+    # ── মিডিয়া (ব্যর্থ হলে টেক্সট-অনলি এগোই, আগের আচরণের মতো) ──
+    if media_paths:
+        if not attach_media(page, scope, media_paths):
+            print("  ⚠️ মিডিয়া অ্যাটাচ হয়নি — টেক্সট-অনলি পোস্ট করা হবে।")
+            _debug_shot(page, "post_attach_failed")
+
+    # ── Post বাটন: visible + enabled না হওয়া পর্যন্ত অপেক্ষা (ভিডিও আপলোডে বেশি সময়) ──
+    post_btn = scope.locator('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]').first
+    try:
+        post_btn.wait_for(state="visible", timeout=10000)
+    except Exception:
+        _debug_shot(page, "post_nobutton")
+        raise PreClickError("Post বাটন পাওয়া যায়নি")
+    has_video = any(mp.lower().endswith('.mp4') for mp in (media_paths or []))
+    deadline = time.time() + (150 if has_video else 25)
+    while True:
+        try:
+            if post_btn.is_enabled():
+                break
+        except Exception:
+            pass
+        if time.time() > deadline:
+            _debug_shot(page, "post_btn_disabled")
+            raise PreClickError("Post বাটন enabled হয়নি (আপলোড চলছে/অক্ষর-সীমা পেরিয়েছে?)")
+        time.sleep(1.5)
+
+    _move_to(page, post_btn)
     page.wait_for_timeout(random.randint(500, 1200))
-    btn.click()
-    page.wait_for_timeout(5000)
+    return click_post_and_verify(page, post_btn, textarea)
 
 
 def open_compose_and_post(page, text, media_paths):
-    for method_num, method in enumerate(["keyboard", "sidenav", "direct"], 1):
+    """ফেরত: {"ok": bool, "tweet_id"?, "error"?, "uncertain"?}। SESSION_DEAD/CAPTCHA_DETECTED raise করে।"""
+    methods = [("compose_page", "কম্পোজ-পেজ"), ("home_inline", "হোম-ইনলাইন")]
+    last = {"ok": False, "error": "কোনো পদ্ধতিই চালু হয়নি"}
+    for n, (mode, label) in enumerate(methods, 1):
         try:
-            print(f"  🔄 Method {method_num} trying...")
-            if method in ["keyboard", "sidenav"]:
-                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(random.randint(4000, 7000))
-                if check_session_dead(page):
-                    raise Exception("SESSION_DEAD")
-                if check_captcha(page):
-                    raise Exception("CAPTCHA_DETECTED")
-                if method == "keyboard":
-                    page.keyboard.press("n")
-                else:
-                    btn = page.wait_for_selector(
-                        'a[data-testid="SideNav_NewTweet_Button"]', timeout=15000
-                    )
-                    box = btn.bounding_box()
-                    human_mouse_move(page, box['x'] + box['width']//2, box['y'] + box['height']//2)
-                    btn.click()
-            else:
-                page.goto("https://x.com/compose/post", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(random.randint(4000, 7000))
-                if check_session_dead(page):
-                    raise Exception("SESSION_DEAD")
-                if check_captcha(page):
-                    raise Exception("CAPTCHA_DETECTED")
-            page.wait_for_timeout(random.randint(2000, 4000))
-            type_and_submit(page, text, media_paths)
-            print(f"  ✅ Method {method_num} success!")
-            return True
+            print(f"  🔄 পদ্ধতি {n} ({label})...")
+            return do_compose(page, text, media_paths, mode)   # ক্লিকের পরের ফল চূড়ান্ত — রিট্রাই নেই
+        except PreClickError as e:
+            print(f"  ❌ পদ্ধতি {n} ক্লিকের আগেই ব্যর্থ: {e}")
+            last = {"ok": False, "error": str(e)}
         except Exception as e:
             if "CAPTCHA_DETECTED" in str(e) or "SESSION_DEAD" in str(e):
                 raise
-            print(f"  ❌ Method {method_num} failed: {e}")
-    print("  💥 All methods failed.")
-    return False
+            print(f"  ❌ পদ্ধতি {n} ব্যর্থ: {_short(e)}")
+            _debug_shot(page, f"post_m{n}_exc")
+            last = {"ok": False, "error": _short(e)}
+    print("  💥 সব পদ্ধতি ব্যর্থ।")
+    return last
 
 
 def simulate_scroll(page):
@@ -1152,7 +1458,7 @@ def simulate_scroll(page):
             time.sleep(random.uniform(0.5, 1.5))
         print("  📜 Scrolled timeline naturally.")
     except Exception as e:
-        print(f"  ⚠️ Scroll error: {e}")
+        print(f"  ⚠️ Scroll error: {_short(e)}")
 
 
 # ──────────────────────────────────────────────
@@ -1201,18 +1507,32 @@ def select_shortlist_for_ai(candidates, top_n=15):   # increased to 15 for more 
 
 
 # ──────────────────────────────────────────────
-# POST-ONLY FUNCTION (with topic memory filter + 280‑char safety + fallback image)
+# POST-ONLY FUNCTION
+# ফেরত: True = পোস্ট হয়েছে (X নিশ্চিত) | "dead" = সেশন মৃত | "post_failed" = পোস্ট ব্যর্থ
+#       "net_down" = পরপর ৩টা সোর্স লোড হয়নি (নেটওয়ার্ক/exit node সমস্যা)
+#       False = পোস্টযোগ্য কিছু পাওয়া যায়নি/ক্যাপচা
 # ──────────────────────────────────────────────
 def perform_post_only(page, posted_cache, fallback_image_path=None):
     context = page.context
     candidates = []
+    load_fails = 0      # পরপর কতগুলো সোর্স লোডই হয়নি (ফোন অফলাইন/exit node মৃত হলে এটা বাড়ে)
     for source in random.sample(SOURCES, len(SOURCES)):
         print(f"\n📡 @{source} checking...")
         try:
             page.goto(f"https://x.com/{source}", wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(random.randint(5000, 8000))
-        except:
+            try:
+                page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
+            except Exception:
+                pass
+            page.wait_for_timeout(random.randint(1500, 3500))
+        except Exception as e:
+            load_fails += 1
+            print(f"  ⚠️ @{source} লোড হয়নি ({load_fails}/3): {_short(e)}")
+            if load_fails >= 3:
+                print("🌐 পরপর ৩টা সোর্স লোড হয়নি — নেটওয়ার্ক/exit node সমস্যা ধরে এই রাউন্ড বাতিল।")
+                return "net_down"
             continue
+        load_fails = 0
         if check_captcha(page):
             return False
         if check_session_dead(page):
@@ -1220,7 +1540,7 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
         tweets = page.query_selector_all('article[data-testid="tweet"]')
         if not tweets:
             continue
-        for i, tweet in enumerate(tweets[:6]):
+        for i, tweet in enumerate(tweets[:8]):   # ৬ → ৮: সাপ্লাই ইনশুরেন্স
             try:
                 if is_pinned_tweet(tweet) or is_retweet(tweet) or is_thread_continuation(tweet):
                     continue
@@ -1228,19 +1548,24 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
                 txt = text_el.inner_text() if text_el else ""
                 if not txt or is_duplicate(txt, posted_cache) or is_promotional(txt) or is_too_short(txt) or is_forbidden_topic(txt):
                     continue
+                if text_hash(txt) in RUN_SKIP:
+                    continue
                 age = get_tweet_age_minutes(tweet)
                 if age > 240:          # 4-hour cutoff
                     continue
-                like_btn = tweet.query_selector('button[data-testid="like"]')
-                likes = parse_count(like_btn.inner_text()) if like_btn else 0
-                views = get_tweet_view_count(tweet)
+                stats = get_tweet_stats(tweet)
+                likes, views = stats["likes"], stats["views"]
+                imgs, has_video = get_tweet_media_info(tweet)
+                url = get_tweet_status_url(tweet)
                 sc = score_tweet(txt, likes, views, age)
-                print(f"  ✅ {i+1} | Age:{age}m Likes:{likes} Score:{sc:.1f} | {txt[:60]}...")
+                flags = ("🎥" if has_video else "") + (f"🖼{len(imgs)}" if imgs else "")
+                print(f"  ✅ {i + 1} | Age:{age}m Likes:{likes} Views:{views} Score:{sc:.1f} {flags}| {txt[:60]}...")
                 candidates.append({
                     'index': i, 'text': txt, 'source': source, 'likes': likes,
                     'views': views, 'age_min': age, 'score': sc,
+                    'url': url, 'imgs': imgs, 'has_video': has_video,
                 })
-            except:
+            except Exception:
                 pass
     if not candidates:
         print("\n⚠️ No new posts found.")
@@ -1248,156 +1573,157 @@ def perform_post_only(page, posted_cache, fallback_image_path=None):
 
     # ────── Topic memory filtering (6-hour window, min 3 common keywords) ──────
     topic_memory = load_topic_memory()
-    filtered_candidates = []
-    for c in candidates:
-        if not is_similar_topic(c["text"], topic_memory, min_overlap=3):
-            filtered_candidates.append(c)
-    if not filtered_candidates:
+    candidates = [c for c in candidates if not is_similar_topic(c["text"], topic_memory, min_overlap=3)]
+    if not candidates:
         print("\n⚠️ All candidates are on recently posted topics — skipping this round.")
         return False
-    candidates = filtered_candidates
 
-    top_candidates = select_shortlist_for_ai(candidates, top_n=15)   # pass 15
-    best_tweet = ai_select_best_tweet(top_candidates)
-    if best_tweet is None:
-        best_tweet = max(candidates, key=lambda x: x['score'])
-    original_text = best_tweet['text']
-    chosen_source = best_tweet['source']
-    best_idx = best_tweet['index']
-    print(f"\n🏆 Selected: @{chosen_source} | {original_text[:100]}...")
-
-    print(f"\n📡 Reloading @{chosen_source} for media...")
-    reloaded = False
-    try:
-        page.goto(f"https://x.com/{chosen_source}", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(random.randint(3000, 5000))
-        reloaded = True
-    except:
-        pass
-    has_video = False
+    # ────── নির্বাচন + মিডিয়া (ভিডিও খুব বড় হলে পরের সেরা প্রার্থী, সর্বোচ্চ ৩ বার) ──────
+    pool = list(candidates)
+    best_tweet = None
     media_paths = []
-    if reloaded:
-        page_source = chosen_source
-        matched_idx = find_matching_tweet_index(page, original_text)
-        if matched_idx is None:
-            print("  ⚠️ Couldn't relocate the selected tweet after reload (timeline shifted). Posting text-only.")
+    for attempt in range(3):
+        if attempt == 0:
+            shortlist = select_shortlist_for_ai(pool, top_n=15)
+            best_tweet = ai_select_best_tweet(shortlist)
         else:
-            best_idx = matched_idx
-            has_video = check_video_in_article(page, best_idx)
-            media_paths = extract_media_urls_safely(page, best_idx)
-            if media_paths == "TOO_LARGE":
-                print("  ⏭ Video too large, trying next best candidate...")
-                remaining = [c for c in candidates if c != best_tweet]
-                if not remaining:
-                    print("  ❌ No more candidates.")
-                    return False
-                best_tweet = max(remaining, key=lambda x: x['score'])
-                original_text = best_tweet['text']
-                chosen_source = best_tweet['source']
-                best_idx = best_tweet['index']
-                print(f"  🔄 New selection: @{chosen_source} | {original_text[:80]}...")
-                if chosen_source != page_source:
-                    try:
-                        page.goto(f"https://x.com/{chosen_source}", wait_until="domcontentloaded", timeout=60000)
-                        page.wait_for_timeout(random.randint(3000, 5000))
-                        page_source = chosen_source
-                    except:
-                        pass
-                matched_idx = find_matching_tweet_index(page, original_text)
-                if matched_idx is None:
-                    print("  ⚠️ Couldn't relocate next candidate either, posting text-only.")
-                    has_video = False
-                    media_paths = []
-                else:
-                    best_idx = matched_idx
-                    has_video = check_video_in_article(page, best_idx)
-                    media_paths = extract_media_urls_safely(page, best_idx)
-                    if media_paths == "TOO_LARGE":
-                        print("  ⚠️ Next candidate also too large, posting text only.")
-                        media_paths = []
-                        has_video = False
-    print(f"  🎥 Video: {has_video}, 🖼 Media: {len(media_paths) if isinstance(media_paths, list) else 0} files")
+            best_tweet = None
+        if best_tweet is None:
+            best_tweet = max(pool, key=lambda x: x['score'])
+        print(f"\n🏆 Selected: @{best_tweet['source']} | {best_tweet['text'][:100]}...")
+        media = prepare_media(best_tweet)
+        if media == "TOO_LARGE":
+            print("  ⏭ Video too large, trying next best candidate...")
+            pool = [c for c in pool if c is not best_tweet]
+            if not pool:
+                print("  ❌ No more candidates.")
+                return False
+            continue
+        media_paths = media
+        break
+    else:
+        print("  ❌ তিনবারই ভিডিও বড় — এই রাউন্ড বাদ।")
+        return False
 
-    # ── কোনো নেটিভ মিডিয়া না পাওয়া গেলে fallback ছবি ব্যবহার (run-এর জন্য একবার ডাউনলোড করা কপি) ──
+    original_text = best_tweet['text']
+    print(f"  🎥 Video: {best_tweet['has_video']}, 🖼 Media: {len(media_paths)} files")
+
+    # ── কোনো নেটিভ মিডিয়া না পাওয়া গেলে fallback ছবি ব্যবহার ──
     if not media_paths and fallback_image_path and os.path.exists(fallback_image_path):
         print("  🖼️ No native media found — using fallback image.")
         media_paths = [fallback_image_path]
 
     print("  🤖 Generating caption...")
     final_caption = build_final_caption(original_text, context=context)
-
-    # ── 280-char safety for free tier ──
-    if len(final_caption) > 280:
-        parts = final_caption.split("\n\n")
-        if len(parts) > 1:
-            final_caption = parts[0].strip()
-            print("  ✂️ Caption too long, using first sentence only.")
-        else:
-            final_caption = final_caption[:280].rsplit(". ", 1)[0].strip()
-            print("  ✂️ Caption too long, truncated to 280 chars.")
-    print(f"  ✅ Caption: {final_caption}")
+    final_caption = sanitize_caption(final_caption)
+    final_caption = fit_caption(final_caption, limit=280)
+    print(f"  ✅ Caption ({x_weighted_len(final_caption)}/280): {final_caption}")
 
     print("\n📤 Posting...")
     try:
-        posted = open_compose_and_post(page, final_caption, media_paths)
+        result = open_compose_and_post(page, final_caption, media_paths)
     except Exception as e:
         if "SESSION_DEAD" in str(e):
             return "dead"
+        if "CAPTCHA_DETECTED" in str(e):
+            return False
         raise
-    for path in media_paths:
-        if path == fallback_image_path:
-            continue  # fallback ছবিটা পুরো run জুড়ে reuse হবে, এখানে ডিলিট করা যাবে না
-        try:
-            os.remove(path)
-        except:
-            pass
-    if posted:
+    finally:
+        for path in media_paths:
+            if path == fallback_image_path:
+                continue  # fallback ছবিটা পুরো run জুড়ে reuse হবে
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    if result.get("ok"):
         save_to_cache(original_text, POSTED_CACHE)
         add_to_topic_memory(original_text)
         trim_cache(POSTED_CACHE)
-        print("✅ Post successful!")
-        save_session_cache(context, label="post")   # নতুন: রোটেটেড কুকি ক্যাশে ধরা থাকবে
+        print("✅ Post successful! (X নিশ্চিত করেছে)")
+        save_session_cache(context, label="post")
         limit_reached = increment_daily_counter()
         simulate_scroll(page)
         if limit_reached:
             print("🎯 Daily post limit reached. Stopping further posts today.")
         return True
-    else:
-        print("❌ Post failed.")
-        return False
+
+    # ── ব্যর্থ: কাউন্টার/টপিক মেমরি বাড়ে না; এই রানে একই টুইট আর নয় ──
+    RUN_SKIP.add(text_hash(original_text))
+    if result.get("uncertain"):
+        # উত্তর আসেনি — পোস্ট হয়ে থাকতে পারে; ডুপ্লিকেট এড়াতে ক্যাশে রাখি (কাউন্টারে গুনি না)
+        save_to_cache(original_text, POSTED_CACHE)
+        print("⚠️ ফল অনিশ্চিত — সম্ভাব্য ডুপ্লিকেট এড়াতে টুইটটা ক্যাশে রাখা হলো, কাউন্টারে গোনা হয়নি।")
+    print(f"❌ Post failed: {result.get('error')}")
+    return "post_failed"
 
 
 # ──────────────────────────────────────────────
-# HUMAN DELAY FUNCTION (adjusted for 40-48 posts/day)
+# HUMAN DELAY (office-hour strategy: পোস্ট-সাইকেল শেষে র‍্যান্ডম বিরতি)
 # ──────────────────────────────────────────────
-def human_delay(iteration, hour):
-    if 6 <= hour < 10:
-        base = random.randint(22, 35) * 60      # ~28 min avg -> ~12.8 posts in 6h
-    elif 10 <= hour < 16:
-        base = random.randint(25, 38) * 60      # ~31 min avg -> ~11.6
-    elif 16 <= hour < 22:
-        base = random.randint(22, 35) * 60      # ~28 min
-    else:
-        base = random.randint(30, 45) * 60      # ~37 min -> ~9.7
-    return base
+def human_delay():
+    lo = int(os.environ.get("DELAY_MIN_MINUTES", "5"))
+    hi = int(os.environ.get("DELAY_MAX_MINUTES", "15"))
+    if hi < lo:
+        lo, hi = hi, lo
+    return random.randint(lo, hi) * 60
 
 
 # ──────────────────────────────────────────────
-# MAIN LOOP
+# MAIN LOOP (রান-উইন্ডো workflow-এর MAX_RUN_MINUTES env থেকে আসে)
+# ফেরত: exit code (0 = ঠিক, 1 = ব্যর্থ/সেশন মৃত/পরপর পোস্ট-ব্যর্থতা)
 # ──────────────────────────────────────────────
+WEBDRIVER_HIDE_JS = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+    window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
+    Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+    Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+    Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Google Inc. (Intel)';
+        if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+        return getParameter.call(this, parameter);
+    };
+    const originalCreateOscillator = AudioContext.prototype.createOscillator;
+    AudioContext.prototype.createOscillator = function() {
+        const osc = originalCreateOscillator.apply(this, arguments);
+        const originalStart = osc.start;
+        osc.start = function() {
+            setTimeout(() => originalStart.apply(this, arguments), Math.random() * 2);
+        };
+        return osc;
+    };
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+            Promise.resolve({state: Notification.permission}) :
+            originalQuery(parameters)
+    );
+"""
+
+
 def run_bot_loop():
     if not validate_session():
-        return
+        return 1
     if is_captcha_locked():
-        return
+        return 0
     target, current = get_daily_limit()
     print(f"📊 Daily limit: {current}/{target}")
     if current >= target:
         print("🎯 Today's post limit already reached. Exiting.")
-        return
+        return 0
 
-    MAX_DURATION = 6 * 3600
+    # ── রান-ডিউরেশনের নব workflow-এ (MAX_RUN_MINUTES env); কোড শুধু মানটা পড়ে নেয় ──
+    MAX_RUN_MINUTES = int(os.environ.get("MAX_RUN_MINUTES", "235"))
+    MAX_DURATION = MAX_RUN_MINUTES * 60
+    MAX_FAILS = int(os.environ.get("MAX_CONSECUTIVE_FAILS", "4"))
+    print(f"⏱ Run window: {MAX_RUN_MINUTES} minutes (workflow-set). পরপর {MAX_FAILS}বার ব্যর্থ হলে রান ফেল হবে।")
     start_time = time.time()
+    exit_code = 0
 
     with sync_playwright() as p:
         headless = os.environ.get("HEADLESS", "false").lower() == "true"
@@ -1423,44 +1749,23 @@ def run_bot_loop():
             viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
-            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) return 'Google Inc. (Intel)';
-                if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-                return getParameter.call(this, parameter);
-            };
-            const originalCreateOscillator = AudioContext.prototype.createOscillator;
-            AudioContext.prototype.createOscillator = function() {
-                const osc = originalCreateOscillator.apply(this, arguments);
-                const originalStart = osc.start;
-                osc.start = function() {
-                    setTimeout(() => originalStart.apply(this, arguments), Math.random() * 2);
-                };
-                return osc;
-            };
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({state: Notification.permission}) :
-                    originalQuery(parameters)
-            );
-        """)
+        page.add_init_script(WEBDRIVER_HIDE_JS)
 
-        # ── run শুরুতে একবারই fallback ছবি ডাউনলোড, পুরো ৬ ঘণ্টা reuse হবে ──
+        # ── শুরুতেই যাচাই: আসলে লগইন আছে? কোন অ্যাকাউন্টে? ──
+        if not verify_login_and_identity(page):
+            clear_session_cache()
+            browser.close()
+            return 1
+
+        # ── run শুরুতে একবারই fallback ছবি ডাউনলোড, পুরো রান জুড়ে reuse হবে ──
         fallback_image_path = download_fallback_image()
 
         print(f"\n🤖 News Bot started (Post-Only Mode) — {datetime.now(BD_TZ).strftime('%Y-%m-%d %H:%M:%S')} (BD time)")
         iteration = 0
+        posts_since_siesta = 0
+        consecutive_fails = 0
         session_died = False
-        SIESTA_EVERY = 1000
+        SIESTA_EVERY = 8             # প্রতি ৮ পোস্টে একবার চা-বিরতি
 
         while True:
             target, current = get_daily_limit()
@@ -1468,31 +1773,65 @@ def run_bot_loop():
                 print("🎯 Daily limit reached. Stopping.")
                 break
             elapsed = time.time() - start_time
-            if elapsed > MAX_DURATION - 300:
-                print("⏰ Approaching 6-hour limit. Exiting loop.", flush=True)
+            if elapsed > MAX_DURATION:
+                print(f"⏰ MAX_RUN_MINUTES ({MAX_RUN_MINUTES}m, workflow-set) reached. Exiting loop gracefully.", flush=True)
                 break
             if is_captcha_locked():
                 print("🔒 Captcha lock active. Exiting loop.", flush=True)
                 break
-            if iteration > 0 and iteration % SIESTA_EVERY == 0:
-                siesta = random.randint(45, 90) * 60
-                print(f"\n☕ Siesta for {siesta//60} minutes...", flush=True)
-                time.sleep(siesta)
-                continue
             iteration += 1
             now = datetime.now(BD_TZ)
             print(f"\n🔄 Post iteration {iteration} — {now.strftime('%H:%M:%S')} (BD time)", flush=True)
             posted_cache = load_cache(POSTED_CACHE)
-            success = perform_post_only(page, posted_cache, fallback_image_path)
+
+            try:
+                success = perform_post_only(page, posted_cache, fallback_image_path)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"💥 অপ্রত্যাশিত ত্রুটি: {_short(e)}", flush=True)
+                traceback.print_exc()
+                try:
+                    page.screenshot(path=f"captcha_debug_crash_{int(time.time())}.png")
+                except Exception:
+                    pass
+                success = "post_failed"
+
             if success == "dead":
                 print("🔐 Session dead — stopping run. নতুন কুকি আপলোড করুন।", flush=True)
                 session_died = True
+                exit_code = 1
                 break
-            if not success:
-                print("⚠️ Post failed, continuing after delay.", flush=True)
-            delay = human_delay(iteration, now.hour)
-            print(f"⏳ Next post in {delay//60} minutes...", flush=True)
+
+            if success is True:
+                consecutive_fails = 0
+                posts_since_siesta += 1
+                delay = human_delay()
+            elif success in ("post_failed", "net_down"):
+                consecutive_fails += 1
+                what = "নেটওয়ার্ক/exit node সমস্যা" if success == "net_down" else "পোস্ট-ব্যর্থতা"
+                print(f"⚠️ পরপর {what}: {consecutive_fails}/{MAX_FAILS}", flush=True)
+                if consecutive_fails >= MAX_FAILS:
+                    if success == "net_down":
+                        print("🛑 নেটওয়ার্ক বারবার অচল (ফোন অফলাইন/Tailscale বন্ধ/ইন্টারনেট নেই?) — "
+                              "অকারণ ঘুরে না থেকে রান ফেল করা হলো।", flush=True)
+                    else:
+                        print("🛑 পরপর অনেকবার পোস্ট ব্যর্থ — ফেক চলা এড়াতে রান ফেল করা হলো। "
+                              "attach_fail_* স্ক্রিনশট ও লগের 'X পোস্ট নেয়নি' লাইন দেখুন।", flush=True)
+                    exit_code = 1
+                    break
+                delay = random.randint(2, 4) * 60   # ব্যর্থতার পর ছোট বিরতি
+            else:
+                print("⚠️ এই রাউন্ডে পোস্ট হয়নি (পোস্টযোগ্য কিছু নেই/ক্যাপচা), বিরতির পর আবার।", flush=True)
+                delay = human_delay()
+
+            print(f"⏳ Next post in {delay // 60} minutes...", flush=True)
             time.sleep(delay)
+            if posts_since_siesta >= SIESTA_EVERY:
+                siesta = random.randint(10, 15) * 60
+                print(f"\n☕ Siesta for {siesta // 60} minutes...", flush=True)
+                time.sleep(siesta)
+                posts_since_siesta = 0
 
         if session_died:
             clear_session_cache()
@@ -1500,10 +1839,11 @@ def run_bot_loop():
             save_session_cache(context, label="run end")
         browser.close()
         print("\n🔒 Browser closed. Loop ended.", flush=True)
+    return exit_code
 
 
 if __name__ == "__main__":
     delay = random.randint(60, 180)
     print(f"⏱ {delay}s initial delay...")
     time.sleep(delay)
-    run_bot_loop()
+    sys.exit(run_bot_loop() or 0)
