@@ -51,7 +51,7 @@ PROMO_KEYWORDS = [
 
 # ── কেবল জিওপলিটিক্যাল কনটেন্টে অপ্রাসঙ্গিক কয়েকটি স্পোর্টস-টপিক ব্লক করা হচ্ছে
 FORBIDDEN_KEYWORDS = [
-    "ki", "ki kinping", "kinking", "kaikan", "india"
+    "xi", "xi jinping", "jinping", "taiwan", "india"
 ]
 
 MEDIA_DIR = "downloaded_media"
@@ -1074,7 +1074,7 @@ def fit_caption(text, limit=280):
 
 
 def build_final_caption(original_text, context=None):
-    prompt = f"""PERSONA: You are a social media news aggregator. You've just seen a report (the reference tweet below). You need to tweet your own version of it in simple, everyday words.
+    prompt = f"""PERSONA: You are a pro Iranian social media personality. You've just seen a report (the reference tweet below). You need to tweet your own version of it in simple, everyday words.
 
 Search web, rewrite this into a main sentence and 1,2 or 3 detailed sentences everything under 280 total characters with key facts only, in simple words. No extra words.
 Use "🚨 BREAKING:" or "🚨 JUST IN:" as a prefix.
